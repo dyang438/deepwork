@@ -1,0 +1,17 @@
+name: test
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Python tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - name: Extension tests
+        run: for t in tests/test_*.js; do node "$t"; done

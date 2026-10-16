@@ -1,0 +1,9 @@
+log.jsonl
+capture.md
+sessions/
+tests/live-test-log.jsonl
+chrome-ext/_metadata/
+__pycache__/
+*.pyc
+*.tmp
+.DS_Store

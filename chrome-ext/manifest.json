@@ -1,0 +1,87 @@
+{
+  "manifest_version": 3,
+  "name": "deepwork",
+  "version": "2.3.0",
+  "description": "Blocks inbox, calendar, shopping and YouTube and hides X and LinkedIn feeds, only while a deepwork session is running. Reports active-tab domains (never paths or titles) to the local deepwork sampler.",
+  "permissions": [
+    "declarativeNetRequest",
+    "declarativeNetRequestFeedback",
+    "storage",
+    "alarms",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:47615/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "deepwork_block",
+        "enabled": false,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*",
+        "https://www.linkedin.com/*",
+        "https://linkedin.com/*"
+      ],
+      "js": [
+        "feeds.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://mail.google.com/*",
+        "https://calendar.google.com/*",
+        "https://app.shortwave.com/*",
+        "https://*.amazon.com/*",
+        "https://amazon.com/*",
+        "https://*.doordash.com/*",
+        "https://doordash.com/*",
+        "https://*.youtube.com/*",
+        "https://youtube.com/*",
+        "https://superhuman.com/*",
+        "https://*.superhuman.com/*"
+      ],
+      "exclude_matches": [
+        "https://*.aws.amazon.com/*",
+        "https://aws.amazon.com/*"
+      ],
+      "js": [
+        "overlay.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "blocked.html",
+        "blocked.js"
+      ],
+      "matches": [
+        "https://mail.google.com/*",
+        "https://calendar.google.com/*",
+        "https://app.shortwave.com/*",
+        "https://*.amazon.com/*",
+        "https://amazon.com/*",
+        "https://*.doordash.com/*",
+        "https://doordash.com/*",
+        "https://*.youtube.com/*",
+        "https://youtube.com/*",
+        "https://superhuman.com/*",
+        "https://*.superhuman.com/*"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/blocked.html"
+      }
+    },
+    "condition": {
+      "requestDomains": [
+        "amazon.com",
+        "doordash.com",
+        "mail.google.com",
+        "app.shortwave.com",
+        "calendar.google.com",
+        "youtube.com",
+        "youtu.be",
+        "superhuman.com"
+      ],
+      "excludedRequestDomains": [
+        "aws.amazon.com"
+      ],
+      "resourceTypes": [
+        "main_frame"
+      ]
+    }
+  }
+]

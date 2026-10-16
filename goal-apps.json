@@ -1,0 +1,6 @@
+{
+  "note": "Experimental time-on-goal allowlist. App names are macOS display names; '*.x' matches subdomains of x.",
+  "apps": ["Terminal", "iTerm", "iTerm2", "Cursor", "Code", "Visual Studio Code", "Claude", "ChatGPT", "Codex",
+           "Obsidian", "Notes", "Preview"],
+  "domains": ["localhost", "127.0.0.1", "claude.ai", "github.com"]
+}

@@ -1,0 +1,1109 @@
+#!/usr/bin/python3
+"""deepwork: timed deep work sessions on macOS.
+
+  deepwork [min]          start a session (default 90 minutes)
+  deepwork off            end the session now and run the shutdown ritual
+  deepwork status         show the current session
+  deepwork stats          deep hours today, this week, per goal (--all includes everyone in the log)
+  deepwork capture "..."  append a stray thought to the capture file
+  deepwork baseline [min] sample activity with no blocking (default 60), to compare with deep work
+  deepwork break [min]    (experimental) plan a break (default 10) that starts 5 min from now
+  deepwork questions      edit your questions, sounds, music pause and apps to quit in $EDITOR (vim)
+  deepwork config         print that settings file
+Flags: -y (skip prompts), -g "goal", --dry-run (no apps quit, no DND,
+isolated state in ~/.deepwork-dryrun, nothing written to the real log).
+"""
+import collections
+import datetime as dt
+import http.server
+import json
+import os
+import re
+import shlex
+import signal
+import socketserver
+import subprocess
+import shutil
+import sys
+import tempfile
+import threading
+import time
+
+ROOT = os.path.dirname(os.path.realpath(__file__))
+APPS = ["Slack", "Shortwave", "Messages", "Mail"]  # desktop apps only; never Chrome
+SHORTCUT_ON, SHORTCUT_OFF = "deepwork-on", "deepwork-off"
+DEFAULT_MIN = 90
+REQUIT_EVERY = 3
+SAMPLE_EVERY = float(os.environ.get("DEEPWORK_SAMPLE_EVERY", "10"))
+ACTIVE_WITHIN = 60  # a sample is active if there was keyboard or mouse input in the last 60 s
+CHROME = "Google Chrome"
+DAILY_CAP_MIN = 240           # experimental: warn (never block) past this many deep minutes a day
+BREAK_DELAY_S = 300           # experimental: a break never starts sooner than 5 minutes after asking
+HALFWAY_WALK_OVER_MIN = 90    # experimental: halfway walk nudge for sessions longer than this
+SCOREBOARD_SLUG = "deepwork/scoreboard"
+
+# Per-person settings live in ~/.deepwork/config.json (deepwork config shows it). A question set to
+# false (or deleted) is skipped; a string replaces its wording; "custom" adds your own questions (answers are logged).
+DEFAULT_CONFIG = {
+    "tracking": True,          # sample front app, Chrome site and blocked-site pulls (stays on this Mac)
+    "share_scoreboard": True,  # add one summary row per session to the shared kb scoreboard
+    "quit_apps": APPS,
+    "music_pause": False,
+    "sounds": {"start": None, "notify": "Glass"},
+    "start_questions": {
+        "goal": "Goal (the one thing this block produces): ",
+        "deadline": "Deadline, keep it tight [{suggested}]: ",
+        "checklist": ["water or coffee", {"item": "food", "over_minutes": 90}, "phone in another room",
+                      "materials open"],
+        "extra_sites": "Extra sites for this goal, comma separated (Enter for none): ",
+        "custom": [],
+    },
+    "shutdown_questions": {
+        "outcome": "Done? (y/partial/n): ",
+        "done": "One line on what got done: ",
+        "open_loops": "Open loops, one per line (empty line to finish):",
+        "tomorrow": "Tomorrow's main deep block (what and when): ",
+        "task_count": "How many tasks did you finish? (Enter skips): ",
+        "custom": [],
+    },
+}
+
+
+def load_config(path):
+    conf = json.loads(json.dumps(DEFAULT_CONFIG))
+    user = read_json(path) if os.path.exists(path) else None
+    for k, v in (user or {}).items():
+        if k.endswith("_questions") and isinstance(v, dict):
+            conf[k] = {q: v.get(q, False) for q in conf[k]}  # a question deleted from the file is skipped
+        elif isinstance(v, dict) and isinstance(conf.get(k), dict):
+            conf[k].update(v)
+        elif k in conf:
+            conf[k] = v
+    return conf
+
+
+# ---------- configuration ----------
+
+class Cfg:
+    def __init__(self, dry):
+        self.dry = dry
+        home = os.path.expanduser("~")
+        default_state = os.path.join(home, ".deepwork-dryrun" if dry else ".deepwork")
+        self.state = os.environ.get("DEEPWORK_HOME", default_state)
+        # Older installs kept their log next to the script; keep using it there if it exists.
+        legacy = os.path.exists(os.path.join(ROOT, "log.jsonl"))
+        data = os.path.join(self.state, "dryrun-data") if dry else (ROOT if legacy else self.state)
+        self.log = os.environ.get("DEEPWORK_LOG", os.path.join(data, "log.jsonl"))
+        self.capture = os.environ.get("DEEPWORK_CAPTURE", os.path.join(data, "capture.md"))
+        self.sessions = os.path.join(os.path.dirname(self.log), "sessions")
+        self.port = int(os.environ.get("DEEPWORK_PORT", "47616" if dry else "47615"))
+        self.who = os.environ.get("DEEPWORK_WHO", os.environ.get("USER", "unknown"))
+        self.session = os.path.join(self.state, "session.json")
+        self.pending = os.path.join(self.state, "pending.json")
+        self.active = os.path.join(self.state, "active.json")
+        self.actions = os.path.join(self.state, "actions.log")
+        self.wdlog = os.path.join(self.state, "watchdog.log")
+        self.share_queue = os.path.join(self.state, "share-queue.jsonl")
+        self.goal_apps = os.environ.get("DEEPWORK_GOAL_APPS", os.path.join(ROOT, "goal-apps.json"))
+        self.git_root = os.environ.get("DEEPWORK_GIT_ROOT", os.path.dirname(ROOT))
+        self.maingen = os.environ.get("DEEPWORK_MAINGEN", "maingen")
+        # Team extras (backlog task counts, shared scoreboard) need the maingen CLI; off in dry runs unless a test
+        # turns them on explicitly.
+        team = "0" if dry or not shutil.which(self.maingen) else "1"
+        self.backlog = os.environ.get("DEEPWORK_BACKLOG", team) == "1"
+        self.share = os.environ.get("DEEPWORK_SHARE", team) == "1"
+        delay = float(os.environ.get("DEEPWORK_BREAK_DELAY", BREAK_DELAY_S))
+        self.break_delay = delay if dry else max(delay, BREAK_DELAY_S)
+        self.config = os.environ.get("DEEPWORK_CONFIG", os.path.join(
+            os.environ.get("DEEPWORK_HOME", os.path.join(home, ".deepwork")), "config.json"))
+        self.conf = load_config(self.config)
+        self.apps = list(self.conf["quit_apps"])
+        self.share = self.share and bool(self.conf["share_scoreboard"])
+        self.tracking = bool(self.conf["tracking"])
+
+
+def ensure_dirs(cfg):
+    if os.path.exists(cfg.state) and not os.path.isdir(cfg.state):
+        sys.exit("%s is a file (old v1 state?). Remove it and retry." % cfg.state)
+    os.makedirs(cfg.state, exist_ok=True)
+    for p in (cfg.log, cfg.capture):
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+    os.makedirs(cfg.sessions, exist_ok=True)
+
+
+def read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def write_json(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=2)
+    os.replace(tmp, path)
+
+
+def now():
+    return time.time()
+
+
+def iso(ts):
+    return dt.datetime.fromtimestamp(ts).astimezone().isoformat(timespec="seconds")
+
+
+def hm(ts):
+    return dt.datetime.fromtimestamp(ts).strftime("%H:%M")
+
+
+# ---------- side effects (all routed through act) ----------
+
+def act(cfg, kind, *args):
+    """Run a system action, or record it when dry."""
+    line = "%s %s %s" % (iso(now()), kind, " ".join(args))
+    if cfg.dry:
+        with open(cfg.actions, "a") as f:
+            f.write(line + "\n")
+        return
+    try:
+        if kind == "quit":
+            if subprocess.run(["pgrep", "-xq", args[0]]).returncode == 0:
+                subprocess.run(["osascript", "-e", 'quit app "%s"' % args[0]], capture_output=True, timeout=10)
+        elif kind == "open":
+            subprocess.run(["open", "-g", "-a", args[0]], capture_output=True, timeout=10)
+        elif kind == "shortcut":
+            if args[0] in shortcut_names():
+                subprocess.run(["shortcuts", "run", args[0]], capture_output=True, timeout=30)
+        elif kind == "notify":
+            msg = args[0].replace('"', "'")
+            snd = cfg.conf["sounds"].get("notify")
+            subprocess.run(["osascript", "-e", 'display notification "%s" with title "deepwork"%s' % (
+                msg, ' sound name "%s"' % snd if snd else "")], capture_output=True, timeout=10)
+        elif kind == "sound":
+            subprocess.Popen(["afplay", "/System/Library/Sounds/%s.aiff" % args[0]],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif kind == "music_pause":
+            if shutil.which("media-control"):
+                subprocess.run(["media-control", "pause"], capture_output=True, timeout=10)
+            for a in ("Spotify", "Music"):
+                if subprocess.run(["pgrep", "-xq", a]).returncode == 0:
+                    subprocess.run(["osascript", "-e", 'tell application "%s" to pause' % a],
+                                   capture_output=True, timeout=10)
+        elif kind == "terminal":
+            # Opening a .command file needs no Automation permission (no AppleScript).
+            ok = False
+            try:
+                ok = subprocess.run(["open", args[0]], capture_output=True, timeout=30).returncode == 0
+            except subprocess.TimeoutExpired:
+                pass
+            if not ok:
+                act(cfg, "notify", "Session over. Open a terminal and run: deepwork off")
+    except Exception as e:  # never let a side effect crash the session
+        sys.stderr.write("deepwork: %s failed: %s\n" % (kind, e))
+
+
+def rm(path):
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
+def shutdown_command(cfg):
+    """Write ~/.deepwork/shutdown.command; Terminal runs it when it is opened."""
+    path = os.path.join(cfg.state, "shutdown.command")
+    with open(path, "w") as f:
+        f.write("#!/bin/zsh\n'%s' off%s\n" % (os.path.realpath(__file__), " --dry-run" if cfg.dry else ""))
+    os.chmod(path, 0o755)
+    return path
+
+
+def shortcut_names():
+    try:
+        out = subprocess.run(["shortcuts", "list"], capture_output=True, text=True, timeout=15).stdout
+        return set(out.splitlines())
+    except Exception:
+        return set()
+
+
+def running_apps(cfg):
+    if cfg.dry:
+        return list(cfg.apps)
+    return [a for a in cfg.apps if subprocess.run(["pgrep", "-xq", a]).returncode == 0]
+
+
+# ---------- session lifecycle ----------
+
+def ask(prompt, default=""):
+    try:
+        ans = input(prompt).strip()
+    except EOFError:
+        ans = ""
+    return ans or default
+
+
+def yes(prompt):
+    return ask(prompt + " [y/n] ", "n").lower().startswith("y")
+
+
+def start(cfg, minutes, assume_yes, goal, kind="deep"):
+    ensure_dirs(cfg)
+    if os.path.exists(cfg.session):
+        s = read_json(cfg.session) or {}
+        sys.exit("A session is already running until %s. Use: deepwork status / deepwork off" % hm(s.get("end", 0)))
+    if os.path.exists(cfg.pending):
+        print("The last session never got its shutdown. Doing that first.")
+        shutdown(cfg, assume_yes)
+
+    start_ts = now()
+    end_ts = start_ts + minutes * 60
+    checklist = {}
+    deadline = hm(end_ts)
+    if kind == "baseline":
+        assume_yes, goal, deadline = True, goal or "baseline (normal work)", ""
+    goal_domains, answers = [], {}
+    if not assume_yes:
+        q = cfg.conf["start_questions"]
+        if q.get("goal"):
+            goal = goal or ask(q["goal"])
+        if q.get("deadline"):
+            suggested = hm(start_ts + minutes * 60 * 0.8)
+            deadline = ask(q["deadline"].format(suggested=suggested), suggested)
+        items = [it if isinstance(it, str) else it["item"] for it in q.get("checklist") or []
+                 if isinstance(it, str) or minutes > it.get("over_minutes", 0)]
+        if items:
+            print("Support checklist:")
+        for it in items:
+            checklist[it] = yes("  %s?" % it)
+        if q.get("extra_sites"):
+            extra = ask(q["extra_sites"])
+            goal_domains = [d.strip().lower() for d in extra.split(",") if d.strip()]
+        for c in q.get("custom") or []:
+            answers[c] = ask(c.rstrip() + " ")
+    if kind == "deep":
+        warn = daily_cap_warning(load_log(cfg.log), cfg.who, minutes)
+        if warn:
+            print(warn)
+    session = {
+        "who": cfg.who, "start": start_ts, "end": end_ts, "planned_minutes": minutes,
+        "goal": goal or "(none given)", "deadline": deadline, "checklist": checklist or "skipped",
+        "dry_run": cfg.dry, "kind": kind,
+        "apps_running": running_apps(cfg) if kind == "deep" else [],
+        "samples_path": os.path.join(cfg.sessions, dt.datetime.fromtimestamp(start_ts).strftime("%Y-%m-%dT%H%M%S") + ".jsonl"),
+        "goal_domains": goal_domains, "breaks": [], "answers": answers,
+    }
+    write_json(cfg.session, session)
+    if kind == "deep":
+        write_json(cfg.active, {"active": True, "who": cfg.who, "goal": session["goal"], "end": iso(end_ts),
+                                "end_ts": end_ts, "note": "Hold non-urgent updates until end."})
+        for a in cfg.apps:
+            act(cfg, "quit", a)
+        if cfg.conf.get("music_pause"):
+            act(cfg, "music_pause")
+        if cfg.conf["sounds"].get("start"):
+            act(cfg, "sound", cfg.conf["sounds"]["start"])
+        act(cfg, "shortcut", SHORTCUT_ON)
+    session["watchdog_pid"] = spawn_watchdog(cfg)
+    write_json(cfg.session, session)
+    if kind == "baseline":
+        print("Baseline sampling until %s (%g min). Nothing is blocked or quit. Stop early: deepwork off%s" % (
+            hm(end_ts), minutes, "  [dry run]" if cfg.dry else ""))
+        return
+    print("Deep work until %s (%g min). Goal: %s%s" % (hm(end_ts), minutes, session["goal"],
+                                                       "  [dry run]" if cfg.dry else ""))
+    print('Stray thought? deepwork capture "..."   Stop early: deepwork off')
+
+
+def claim_and_restore(cfg, ended_by):
+    """Atomically move session.json to pending.json; only the winner restores the machine."""
+    try:
+        os.rename(cfg.session, cfg.pending)
+    except FileNotFoundError:
+        return False
+    s = read_json(cfg.pending) or {}
+    s["ended"] = now()
+    s["ended_by"] = ended_by
+    write_json(cfg.pending, s)
+    if s.get("kind", "deep") != "deep":
+        return True
+    rm(cfg.active)
+    act(cfg, "shortcut", SHORTCUT_OFF)
+    for a in s.get("apps_running", cfg.apps):
+        act(cfg, "open", a)
+    return True
+
+
+def stop_watchdog(cfg, s):
+    pid = (s or {}).get("watchdog_pid")
+    if not pid or pid == os.getpid():
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(30):
+            os.kill(pid, 0)
+            time.sleep(0.1)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def off(cfg, assume_yes):
+    ensure_dirs(cfg)
+    s = read_json(cfg.session)
+    if s:
+        stop_watchdog(cfg, s)
+        claim_and_restore(cfg, "off")
+    if not os.path.exists(cfg.pending):
+        print("No session to shut down.")
+        return
+    shutdown(cfg, assume_yes)
+
+
+def shutdown(cfg, assume_yes):
+    # Claim the pending session atomically so two shutdowns (the popup and a manual one) never collide.
+    claimed = os.path.join(cfg.state, "shutdown-%d.json" % os.getpid())
+    try:
+        os.rename(cfg.pending, claimed)
+    except FileNotFoundError:
+        return print("No session to shut down (another shutdown already handled it).")
+    try:
+        _shutdown(cfg, assume_yes, read_json(claimed) or {})
+    except BaseException:
+        if not os.path.exists(cfg.pending):
+            os.rename(claimed, cfg.pending)  # interrupted: keep it for the next deepwork off
+        raise
+    rm(claimed)
+
+
+def _shutdown(cfg, assume_yes, s):
+    if s.get("kind") == "baseline":
+        assume_yes = True
+    ended = s.get("ended", now())
+    counts = {}
+    worker = None
+    if s.get("kind", "deep") == "deep":
+        worker = threading.Thread(target=count_tasks, args=(cfg, s, ended, counts), daemon=True)
+        worker.start()  # runs while the questions are answered
+    self_count = None
+    outcome, done, loops, tomorrow, answers = "unrecorded", "", [], "", dict(s.get("answers") or {})
+    if not assume_yes:
+        q = cfg.conf["shutdown_questions"]
+        print("Session over. Goal was: %s" % s.get("goal"))
+        if q.get("outcome"):
+            outcome = ask(q["outcome"], "n").lower()
+            outcome = {"y": "done", "yes": "done", "p": "partial", "partial": "partial"}.get(outcome, "not done")
+        if q.get("done"):
+            done = ask(q["done"])
+        if q.get("open_loops"):
+            print(q["open_loops"])
+            while True:
+                line = ask("  > ")
+                if not line:
+                    break
+                loops.append(line)
+        if q.get("tomorrow"):
+            tomorrow = ask(q["tomorrow"])
+        if q.get("task_count"):
+            n = ask(q["task_count"])
+            self_count = int(n) if n.isdigit() else None
+        for c in q.get("custom") or []:
+            answers[c] = ask(c.rstrip() + " ")
+    for line in loops:
+        append_capture(cfg, line, "open loop")
+    if worker:
+        worker.join(150)
+    breaks = [[b["start"], b["end"]] for b in s.get("breaks", []) if b["start"] < ended]
+    rec = {
+        "who": s.get("who", cfg.who), "start": iso(s.get("start", ended)), "end": iso(ended),
+        "minutes": round((ended - s.get("start", ended)) / 60, 1), "planned_minutes": s.get("planned_minutes"),
+        "goal": s.get("goal"), "deadline": s.get("deadline"), "checklist": s.get("checklist"),
+        "outcome": outcome, "done": done, "open_loops": loops, "tomorrow": tomorrow, "answers": answers,
+        "ended_by": s.get("ended_by", "off"), "kind": s.get("kind", "deep"),
+        "activity": summarize(load_log(s["samples_path"]), goal=goal_allowlist(cfg, s.get("goal_domains")),
+                              breaks=breaks) if s.get("samples_path") else None,
+        "breaks": [{"start": iso(b0), "end": iso(min(b1, ended)), "minutes": round((min(b1, ended) - b0) / 60, 1)}
+                   for b0, b1 in breaks],
+        "tasks": {"self": self_count, "backlog_closed": counts.get("backlog"), "git_commits": counts.get("git")},
+    }
+    rec["tasks"]["used"] = tasks_used(rec["tasks"])
+    with open(cfg.log, "a") as f:
+        f.write(json.dumps(rec) + "\n")
+    if rec["activity"]:
+        print(session_line(rec))
+        print(experimental_line(rec))
+    if rec["kind"] == "deep" and cfg.share:
+        print(share_row(cfg, rec))
+    if rec["kind"] == "baseline":
+        return print("Baseline logged (%.0f min)." % rec["minutes"])
+    print("Logged %.0f min. Shutdown complete." % rec["minutes"])
+
+
+def append_capture(cfg, text, tag="capture"):
+    ensure_dirs(cfg)
+    with open(cfg.capture, "a") as f:
+        f.write("- [%s] (%s) %s\n" % (dt.datetime.now().strftime("%Y-%m-%d %H:%M"), tag, text))
+
+
+def watchdog_alive(s):
+    pid = (s or {}).get("watchdog_pid")
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
+
+
+def status(cfg):
+    s = read_json(cfg.session)
+    if not s:
+        if os.path.exists(cfg.pending):
+            print("Session ended; shutdown not done yet. Run: deepwork off")
+        else:
+            print("No deep work session.")
+        return
+    left = max(0, s["end"] - now()) / 60
+    alive = watchdog_alive(s)
+    print("%s until %s (%.0f min left). Goal: %s" % ("Baseline sampling" if s.get("kind") == "baseline" else "Deep work",
+                                                       hm(s["end"]), left, s["goal"]))
+    for b in s.get("breaks", []):
+        if b["end"] > now():
+            print("Break planned %s to %s (experimental)" % (hm(b["start"]), hm(b["end"])))
+    print("Deadline: %s   Watchdog: %s   Extension endpoint: %s" % (
+        s.get("deadline"), "running" if alive else "DEAD", "up" if endpoint_up(cfg) else "down"))
+    if not alive:
+        s["watchdog_pid"] = spawn_watchdog(cfg)
+        write_json(cfg.session, s)
+        print("Restarted the watchdog.")
+
+
+def endpoint_up(cfg):
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/state" % cfg.port, timeout=1) as r:
+            return json.load(r).get("active") is True
+    except Exception:
+        return False
+
+
+# ---------- scoreboard ----------
+
+def load_log(path):
+    out = []
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        out.append(json.loads(line))
+                    except ValueError:
+                        pass
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def in_breaks(t, breaks):
+    return any(b0 <= t < b1 for b0, b1 in breaks or [])
+
+
+def on_goal(sample, goal):
+    apps, doms = goal
+    if (sample.get("app") or "").lower() in apps:
+        return True
+    d = sample.get("domain") if sample.get("app") == CHROME else None
+    if not d:
+        return False
+    return any(d == p or (p.startswith("*.") and d.endswith(p[1:])) for p in doms)
+
+
+def summarize(events, every=None, goal=None, breaks=None):
+    """Activity summary for one session from its samples file. Domains only; no titles or content.
+    Samples inside planned breaks are left out."""
+    every = every or SAMPLE_EVERY
+    samples = [e for e in events if e.get("type") == "sample" and not in_breaks(e.get("t", 0), breaks)]
+    if samples and samples[0].get("every"):
+        every = samples[0]["every"]
+    n = len(samples)
+    hours = n * every / 3600 or 1e-9
+    act_n = sum(1 for x in samples if x.get("active"))
+    longest = run = 0
+    for x in samples:
+        run = run + 1 if x.get("active") else 0
+        longest = max(longest, run)
+    apps = collections.Counter(x.get("app") or "?" for x in samples)
+    doms = collections.Counter(x["domain"] for x in samples if x.get("app") == CHROME and x.get("domain"))
+    app_sw = sum(1 for a, b in zip(samples, samples[1:]) if a.get("app") != b.get("app"))
+    seq = [e["domain"] for e in events if e.get("type") == "tab" and e.get("domain")]
+    dom_sw = sum(1 for a, b in zip(seq, seq[1:]) if a != b)
+    hits = collections.Counter(e.get("domain") or "?" for e in events if e.get("type") == "hit")
+    m = lambda k: round(k * every / 60, 1)
+    return {
+        "samples": n, "sample_every_s": every, "active_min": m(act_n), "idle_min": m(n - act_n),
+        "focus_ratio": round(act_n / n, 2) if n else None, "longest_active_min": m(longest),
+        "app_switches_per_h": round(app_sw / hours, 1), "domain_switches_per_h": round(dom_sw / hours, 1),
+        "top_apps": [[a, m(c)] for a, c in apps.most_common(5)],
+        "top_domains": [[d, m(c)] for d, c in doms.most_common(5)],
+        "blocked_attempts": dict(hits.most_common()),
+        "on_goal_ratio": round(sum(1 for x in samples if on_goal(x, goal)) / n, 2) if (n and goal) else None,
+    }
+
+
+def session_line(r):
+    a = r.get("activity") or {}
+    if not a.get("samples"):
+        return "  %s  %5.0f min  %s  (no activity data)" % (r["start"][:16].replace("T", " "), r.get("minutes") or 0, r.get("goal"))
+    top = ", ".join("%s %d" % kv for kv in list(a["blocked_attempts"].items())[:3]) or "none"
+    return "  %s  %4.0f min  focus %3.0f%%  %4.1f app sw/h  %4.1f site sw/h  longest %4.1f min  blocked: %s  | %s" % (
+        r["start"][:16].replace("T", " "), r.get("minutes") or 0, 100 * (a["focus_ratio"] or 0),
+        a["app_switches_per_h"], a["domain_switches_per_h"], a["longest_active_min"], top, r.get("goal"))
+
+
+def aggregate(recs):
+    acts = [r["activity"] for r in recs if (r.get("activity") or {}).get("samples")]
+    if not acts:
+        return None
+    hours = sum(a["samples"] * a["sample_every_s"] for a in acts) / 3600 or 1e-9
+    hits = collections.Counter()
+    for a in acts:
+        hits.update(a["blocked_attempts"])
+    return {
+        "focus_ratio": sum(a["active_min"] for a in acts) / (sum(a["active_min"] + a["idle_min"] for a in acts) or 1e-9),
+        "app_sw_h": sum(a["app_switches_per_h"] * a["samples"] * a["sample_every_s"] / 3600 for a in acts) / hours,
+        "dom_sw_h": sum(a["domain_switches_per_h"] * a["samples"] * a["sample_every_s"] / 3600 for a in acts) / hours,
+        "longest": max(a["longest_active_min"] for a in acts),
+        "hits": hits.most_common(5),
+    }
+
+
+def agg_line(label, g):
+    if not g:
+        return "%s: no activity data yet" % label
+    return "%s: focus %.0f%%, %.1f app switches/h, %.1f site switches/h, longest stretch %.1f min, top attempts: %s" % (
+        label, 100 * g["focus_ratio"], g["app_sw_h"], g["dom_sw_h"], g["longest"],
+        ", ".join("%s %d" % kv for kv in g["hits"]) or "none")
+
+
+def score_report(records, who=None, today=None):
+    today = today or dt.date.today()
+    monday = today - dt.timedelta(days=today.weekday())
+    day_m = week_m = 0.0
+    per_goal = {}
+    week_deep, week_base = [], []
+    for r in records:
+        if who and r.get("who") != who:
+            continue
+        d = dt.datetime.fromisoformat(r["start"]).date()
+        if r.get("kind") == "baseline":
+            if monday <= d <= today:
+                week_base.append(r)
+            continue
+        m = float(r.get("minutes") or 0)
+        if d == today:
+            day_m += m
+        if monday <= d <= today:
+            week_m += m
+            week_deep.append(r)
+            per_goal[r.get("goal") or "(none)"] = per_goal.get(r.get("goal") or "(none)", 0) + m
+    lines = ["Deep hours today:     %.1f" % (day_m / 60),
+             "Deep hours this week: %.1f  (since Mon %s)" % (week_m / 60, monday.isoformat())]
+    if per_goal:
+        lines.append("Per goal this week:")
+        for g, m in sorted(per_goal.items(), key=lambda kv: -kv[1]):
+            lines.append("  %5.1f h  %s" % (m / 60, g))
+    if week_deep:
+        lines.append("Sessions this week:")
+        lines += [session_line(r) for r in week_deep]
+        lines.append(agg_line("Week, deep work", aggregate(week_deep)))
+    if week_base:
+        lines.append(agg_line("Week, baseline", aggregate(week_base)))
+    if week_deep:
+        lines.append("Experimental:")
+        lines += [experimental_line(r) for r in week_deep]
+        lines += experimental_week(week_deep)
+    return "\n".join(lines)
+
+
+def score(cfg, everyone):
+    print(score_report(load_log(cfg.log), None if everyone else cfg.who))
+    s = read_json(cfg.session)
+    if s:
+        print("(in progress: %.0f min so far, not counted yet)" % ((now() - s["start"]) / 60))
+
+
+# ---------- experimental metrics ----------
+
+def tasks_used(t):
+    """Tasks for the tasks-per-hour metric: his own count when given, else backlog closures, else n/a."""
+    if t.get("self") is not None:
+        return {"n": t["self"], "source": "self"}
+    if t.get("backlog_closed") is not None:
+        return {"n": t["backlog_closed"], "source": "backlog"}
+    return None  # git commits are recorded only: agents commit under his name
+
+
+def experimental_line(r):
+    a = r.get("activity") or {}
+    used = (r.get("tasks") or {}).get("used")
+    hours = (r.get("minutes") or 0) / 60
+    tasks = "tasks n/a" if not used else "tasks %d (%s) = %.1f/deep h" % (
+        used["n"], used["source"], used["n"] / hours if hours else 0)
+    goal = "on goal n/a" if a.get("on_goal_ratio") is None else "on goal %.0f%%" % (100 * a["on_goal_ratio"])
+    br = r.get("breaks") or []
+    pulls = sum((a.get("blocked_attempts") or {}).values())
+    commits = (r.get("tasks") or {}).get("git_commits")
+    return "  %s  %s, %s, outcome %s, breaks %d (%.0f min) vs %d blocked pulls, commits (mostly agents) %s" % (
+        r["start"][:16].replace("T", " "), tasks, goal, r.get("outcome"), len(br),
+        sum(b["minutes"] for b in br), pulls, "n/a" if commits is None else commits)
+
+
+def experimental_week(recs):
+    hours = sum((r.get("minutes") or 0) for r in recs) / 60
+    used = [r["tasks"]["used"] for r in recs if (r.get("tasks") or {}).get("used")]
+    t_hours = sum((r.get("minutes") or 0) for r in recs if (r.get("tasks") or {}).get("used")) / 60
+    out = []
+    out.append("  Week: tasks per deep hour %s" % ("%.1f (%d tasks over %.1f h)" % (
+        sum(u["n"] for u in used) / t_hours, sum(u["n"] for u in used), t_hours) if t_hours else "n/a"))
+    goals = [r["activity"]["on_goal_ratio"] for r in recs if (r.get("activity") or {}).get("on_goal_ratio") is not None]
+    out.append("  Week: time on goal %s" % ("%.0f%%" % (100 * sum(goals) / len(goals)) if goals else "n/a"))
+    rated = [r.get("outcome") for r in recs if r.get("outcome") in ("done", "partial", "not done")]
+    out.append("  Week: goal hit rate %s" % ("%d of %d done, %d partial" % (
+        rated.count("done"), len(rated), rated.count("partial")) if rated else "n/a"))
+    nb = sum(len(r.get("breaks") or []) for r in recs)
+    pulls = sum(sum(((r.get("activity") or {}).get("blocked_attempts") or {}).values()) for r in recs)
+    out.append("  Week: %d planned breaks vs %d blocked-site pulls (%.1f pulls per deep hour)" % (
+        nb, pulls, pulls / hours if hours else 0))
+    return out
+
+
+def goal_allowlist(cfg, extra=None):
+    g = read_json(cfg.goal_apps) or {}
+    return ({a.lower() for a in g.get("apps", [])}, [d.lower() for d in g.get("domains", [])] + list(extra or []))
+
+
+def daily_cap_warning(records, who, minutes, today=None):
+    today = today or dt.date.today()
+    done = sum(float(r.get("minutes") or 0) for r in records
+               if r.get("who") == who and r.get("kind", "deep") == "deep"
+               and dt.datetime.fromisoformat(r["start"]).date() == today)
+    if done + minutes <= DAILY_CAP_MIN:
+        return None
+    left = max(0, DAILY_CAP_MIN - done)
+    tip = ("You are already at the cap; consider stopping for today." if left == 0 else
+           "Consider two blocks: %.0f min now, then the rest after a real break or tomorrow." % left)
+    return "Heads up (experimental): this takes today to %.0f deep min, past the %d min cap. %s" % (
+        done + minutes, DAILY_CAP_MIN, tip)
+
+
+def git_repos(root):
+    out = subprocess.run(["find", root, "-maxdepth", "3", "-name", "node_modules", "-prune", "-o",
+                          "-name", ".git", "-print"], capture_output=True, text=True, timeout=30).stdout
+    return sorted({os.path.dirname(p) for p in out.splitlines() if p})
+
+
+def git_commits(root, author, since, until):
+    hashes = set()
+    for repo in git_repos(root):
+        r = subprocess.run(["git", "-C", repo, "log", "--all", "--regexp-ignore-case", "--author=" + author,
+                            "--since=" + iso(since), "--until=" + iso(until), "--format=%H%x00%b%x1e"],
+                           capture_output=True, text=True, timeout=30)
+        for entry in r.stdout.split("\x1e"):
+            h, _, body = entry.strip().partition("\x00")
+            # Agent-made commits (Claude or Codex co-author trailers) are not his finished tasks.
+            if h and not AGENT_TRAILER.search(body):
+                hashes.add(h)
+    return len(hashes)
+
+
+AGENT_TRAILER = re.compile(r"co-authored-by:.*(claude|codex|anthropic|openai)", re.I)
+
+
+def backlog_snapshot(cfg):
+    """{slug: [status, owner]} for backlog/tasks, via maingen kb pull (read only)."""
+    d = tempfile.mkdtemp(prefix="deepwork-backlog-")
+    try:
+        r = subprocess.run([cfg.maingen, "kb", "pull", "backlog/tasks", d], capture_output=True, text=True, timeout=180)
+        if r.returncode != 0:
+            return None
+        snap = {}
+        for name in os.listdir(d):
+            if name.endswith(".md"):
+                txt = open(os.path.join(d, name)).read()
+                st = re.search(r"^status:\s*'?([\w-]+)", txt, re.M)
+                ow = re.search(r"^owner:\s*'?([\w-]+)", txt, re.M)
+                snap[name[:-3]] = [st.group(1) if st else None, ow.group(1) if ow else None]
+        return snap
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def backlog_closed(before, after, who):
+    """Items now done that were not done or dropped at the start (or are new), owned by who or either."""
+    if before is None or after is None:
+        return None
+    n = 0
+    for slug, (status, owner) in after.items():
+        prev = (before.get(slug) or [None])[0]
+        if status == "done" and prev not in ("done", "dropped") and owner in (who, "either"):
+            n += 1
+    return n
+
+
+def before_path(s):
+    return s["samples_path"].replace(".jsonl", ".backlog-before.json")
+
+
+def count_tasks(cfg, s, ended, out):
+    try:
+        out["git"] = git_commits(cfg.git_root, os.environ.get("DEEPWORK_GIT_AUTHOR", cfg.who), s["start"], ended)
+    except Exception:
+        out["git"] = None
+    if cfg.backlog and s.get("samples_path"):
+        out["backlog"] = backlog_closed(read_json(before_path(s)), backlog_snapshot(cfg), s.get("who", cfg.who))
+
+
+# ---------- shared scoreboard (kb page deepwork/scoreboard) ----------
+
+SCOREBOARD_HEAD = ("---\ntitle: deepwork scoreboard\ntype: concept\ntags:\n  - deepwork\n---\n# deepwork scoreboard\n\nOne row per deep work session, appended automatically by `deepwork`.\n\n"
+                   "| who | date | minutes | goal | focus | tasks per hour | goal hit |\n|---|---|---|---|---|---|---|\n")
+
+
+def shared_row(rec):
+    """Summary only: no app or domain lists."""
+    a = rec.get("activity") or {}
+    used = (rec.get("tasks") or {}).get("used")
+    hours = (rec.get("minutes") or 0) / 60
+    cells = [rec.get("who"), rec["start"][:16].replace("T", " "), "%.0f" % (rec.get("minutes") or 0),
+             (rec.get("goal") or "").replace("|", "/").replace("\n", " ")[:120],
+             "-" if a.get("focus_ratio") is None else "%.0f%%" % (100 * a["focus_ratio"]),
+             "-" if not used or not hours else "%.1f" % (used["n"] / hours), rec.get("outcome") or "-"]
+    return "| " + " | ".join(str(c) for c in cells) + " |"
+
+
+def share_row(cfg, rec):
+    queue = load_log(cfg.share_queue)
+    rows = [q["row"] for q in queue] + [shared_row(rec)]
+    try:
+        r = subprocess.run([cfg.maingen, "kb", "read", SCOREBOARD_SLUG], capture_output=True, text=True, timeout=60)
+        rev = None
+        if r.returncode == 0:
+            m = re.search(r"revision:\s*(\S+)", r.stderr) or re.search(r"^revision:\s*(\S+)\n", r.stdout)
+            body = r.stdout
+            if body.startswith("revision:"):
+                body = body.split("\n", 1)[1] if "\n" in body else ""
+            rev = m.group(1) if m else None
+            if rev is None:
+                raise RuntimeError("no revision from kb read")
+        else:
+            body = SCOREBOARD_HEAD
+        new = body.rstrip("\n") + "\n" + "\n".join(rows) + "\n"
+        fd, tmp = tempfile.mkstemp(suffix=".md")
+        with os.fdopen(fd, "w") as f:
+            f.write(new)
+        cmd = [cfg.maingen, "kb", "write", SCOREBOARD_SLUG, "--file", tmp] + (["--expected-revision", rev] if rev else [])
+        w = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        rm(tmp)
+        if w.returncode != 0:
+            raise RuntimeError("kb write failed")
+    except Exception:
+        with open(cfg.share_queue, "w") as f:
+            for row in rows:
+                f.write(json.dumps({"row": row}) + "\n")
+        return "Scoreboard share failed; queued %d row(s), retrying after the next session." % len(rows)
+    rm(cfg.share_queue)
+    return "Shared %d row(s) to %s." % (len(rows), SCOREBOARD_SLUG)
+
+
+# ---------- breaks (experimental) ----------
+
+def plan_break(cfg, minutes):
+    s = read_json(cfg.session)
+    if not s or s.get("kind", "deep") != "deep":
+        sys.exit("No deep work session running.")
+    t = now()
+    if any(b["end"] > t for b in s.get("breaks", [])):
+        sys.exit("A break is already planned. See: deepwork status")
+    b0 = t + cfg.break_delay
+    if b0 >= s["end"]:
+        sys.exit("The session ends at %s, before a break could start. Keep going." % hm(s["end"]))
+    b1 = min(b0 + minutes * 60, s["end"])
+    s.setdefault("breaks", []).append({"requested": t, "start": b0, "end": b1})
+    write_json(cfg.session, s)
+    print("Break planned %s to %s (experimental). Keep working until then; blocking comes back after." % (hm(b0), hm(b1)))
+
+
+def current_break(s, t=None):
+    t = now() if t is None else t
+    for b in (s or {}).get("breaks", []):
+        if b["start"] <= t < b["end"]:
+            return b
+    return None
+
+
+# ---------- activity sampling (no permissions needed) ----------
+
+def hid_idle_seconds():
+    out = subprocess.run(["ioreg", "-c", "IOHIDSystem", "-d", "4", "-r"], capture_output=True, text=True, timeout=10).stdout
+    m = re.search(r'"HIDIdleTime" = (\d+)', out)
+    return int(m.group(1)) / 1e9 if m else None
+
+
+def front_app():
+    asn = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True, timeout=10).stdout.strip()
+    if not asn:
+        return None
+    out = subprocess.run(["lsappinfo", "info", "-only", "name", asn], capture_output=True, text=True, timeout=10).stdout
+    m = re.search(r'"LSDisplayName"="(.*)"', out)
+    return m.group(1) if m else None
+
+
+class Recorder:
+    """Appends samples and extension events to the session's jsonl file."""
+
+    def __init__(self, path, enabled=True):
+        self.path = path
+        self.enabled = enabled
+        self.lock = threading.Lock()
+        self.domain = None
+
+    def write(self, ev):
+        if not self.enabled:
+            return
+        ev.setdefault("t", round(now(), 1))
+        with self.lock, open(self.path, "a") as f:
+            f.write(json.dumps(ev) + "\n")
+
+    def tab(self, domain):
+        domain = clean_domain(domain)
+        if domain and domain != self.domain:
+            self.domain = domain
+            self.write({"type": "tab", "domain": domain})
+
+    def hit(self, domain, kind):
+        self.write({"type": "hit", "domain": clean_domain(domain) or "?", "kind": str(kind)[:20]})
+
+    def sample(self):
+        try:
+            idle, app = hid_idle_seconds(), front_app()
+        except Exception as e:
+            return self.write({"type": "error", "error": str(e)[:200]})
+        self.write({"type": "sample", "every": SAMPLE_EVERY, "idle_s": None if idle is None else round(idle, 1),
+                    "active": idle is not None and idle < ACTIVE_WITHIN, "app": app,
+                    "domain": self.domain if app == CHROME else None})
+
+
+def clean_domain(d):
+    """Keep only a hostname, never a path or query."""
+    d = str(d or "").strip().lower()
+    return d if re.fullmatch(r"[a-z0-9.-]{1,253}", d) else None
+
+
+# ---------- watchdog ----------
+
+def spawn_watchdog(cfg):
+    """Double fork + setsid so the watchdog survives the terminal closing. Returns its pid."""
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(r)
+        os.setsid()
+        pid2 = os.fork()
+        if pid2:
+            os.write(w, str(pid2).encode())
+            os._exit(0)
+        os.close(w)
+        fd = os.open(cfg.wdlog, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        nul = os.open(os.devnull, os.O_RDONLY)
+        os.dup2(nul, 0)
+        os.dup2(fd, 1)
+        os.dup2(fd, 2)
+        args = [sys.executable, os.path.realpath(__file__), "_watchdog"] + (["--dry-run"] if cfg.dry else [])
+        os.execv(sys.executable, args)
+    os.close(w)
+    data = os.read(r, 32)
+    os.close(r)
+    os.waitpid(pid, 0)
+    return int(data)
+
+
+def serve_state(cfg, rec):
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            s = read_json(cfg.session)
+            running = bool(s) and now() < s["end"]
+            brk = current_break(s) if running else None
+            active = running and s.get("kind", "deep") == "deep" and not brk
+            body = json.dumps({"active": active, "sampling": running, "on_break": bool(brk),
+                               "break_end": brk["end"] if brk else None, "goal": s.get("goal") if running else None,
+                               "end_ts": s.get("end") if running else None}).encode()
+            self.reply(body)
+
+        def do_POST(self):
+            # The custom header forces a CORS preflight, which this server never approves,
+            # so ordinary web pages cannot post here; the extension can.
+            if self.headers.get("X-Deepwork") != "1":
+                return self.reply(b"{}", 403)
+            try:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                data = json.loads(self.rfile.read(n) or b"{}")
+            except ValueError:
+                return self.reply(b"{}", 400)
+            if self.path == "/tab":
+                rec.tab(data.get("domain"))
+            elif self.path == "/hit":
+                rec.hit(data.get("domain"), data.get("kind", "block"))
+            else:
+                return self.reply(b"{}", 404)
+            self.reply(b"{}")
+
+        def reply(self, body, code=200):
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+        allow_reuse_address = True
+
+    try:
+        srv = S(("127.0.0.1", cfg.port), H)
+    except OSError as e:
+        print("%s endpoint not started on port %d: %s" % (iso(now()), cfg.port, e), flush=True)
+        return
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+
+def sampler(cfg, rec):
+    while os.path.exists(cfg.session):
+        rec.sample()
+        time.sleep(SAMPLE_EVERY)
+
+
+def watchdog(cfg):
+    signal.signal(signal.SIGTERM, lambda *a: os._exit(0))
+    print("%s watchdog %d up" % (iso(now()), os.getpid()), flush=True)
+    s0 = read_json(cfg.session) or {}
+    rec = Recorder(s0.get("samples_path") or os.path.join(cfg.sessions, "unknown.jsonl"), cfg.tracking)
+    serve_state(cfg, rec)
+    if cfg.tracking:
+        threading.Thread(target=sampler, args=(cfg, rec), daemon=True).start()
+    deep = s0.get("kind", "deep") == "deep"
+    if deep and cfg.backlog and s0.get("samples_path") and not os.path.exists(before_path(s0)):
+        threading.Thread(target=lambda: write_json(before_path(s0), backlog_snapshot(cfg)), daemon=True).start()
+    halfway = s0.get("start", 0) + (s0.get("end", 0) - s0.get("start", 0)) / 2
+    walk_due = deep and s0.get("planned_minutes", 0) > HALFWAY_WALK_OVER_MIN and now() < halfway + 60
+    on_break = None
+    while True:
+        s = read_json(cfg.session)
+        if not s:
+            return
+        if now() >= s["end"]:
+            if claim_and_restore(cfg, "timer"):
+                if deep:
+                    act(cfg, "notify", "Time is up: %s. Run deepwork off for the shutdown." % s.get("goal"))
+                    act(cfg, "terminal", shutdown_command(cfg))
+                else:
+                    shutdown(cfg, True)
+                    act(cfg, "notify", "Baseline sampling finished. See: deepwork stats")
+            return
+        brk = current_break(s)
+        if brk and not on_break:
+            act(cfg, "notify", "Planned break until %s. Step away from the screen." % hm(brk["end"]))
+        elif on_break and not brk:
+            act(cfg, "notify", "Break over. Blocking is back on.")
+        on_break = brk
+        if walk_due and now() >= halfway:
+            walk_due = False
+            act(cfg, "notify", "Halfway. Take a short walk away from the screen, no phone. Think about the goal.")
+        if deep and not brk:
+            for a in cfg.apps:
+                act(cfg, "quit", a)
+        time.sleep(min(REQUIT_EVERY, max(0.2, s["end"] - now())))
+
+
+# ---------- CLI ----------
+
+def edit_config(cfg):
+    """Open the settings file in $VISUAL/$EDITOR (else nvim, vim, vi); write the defaults first if missing."""
+    if not os.path.exists(cfg.config):
+        os.makedirs(os.path.dirname(cfg.config), exist_ok=True)
+        write_json(cfg.config, cfg.conf)
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or next(
+        (e for e in ("nvim", "vim", "vi") if shutil.which(e)), "vi")
+    while True:
+        subprocess.run(editor + " " + shlex.quote(cfg.config), shell=True)
+        try:
+            with open(cfg.config) as f:
+                json.load(f)
+            return print("Saved %s. Takes effect on the next deepwork start." % cfg.config)
+        except ValueError as e:
+            if not yes("That isn't valid JSON (%s). Edit again?" % e):
+                return print("Left as is; deepwork uses the defaults until it parses.")
+
+def main(argv):
+    dry = "--dry-run" in argv
+    assume_yes = "-y" in argv or "--yes" in argv
+    everyone = "--all" in argv
+    goal = None
+    rest = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-g", "--goal") and i + 1 < len(argv):
+            goal = argv[i + 1]
+            i += 2
+            continue
+        if a not in ("--dry-run", "-y", "--yes", "--all"):
+            rest.append(a)
+        i += 1
+    cfg = Cfg(dry)
+    cmd = rest[0] if rest else str(DEFAULT_MIN)
+    if cmd == "_watchdog":
+        return watchdog(cfg)
+    if cmd == "off":
+        return off(cfg, assume_yes)
+    if cmd == "status":
+        return status(cfg)
+    if cmd in ("stats", "score"):
+        return score(cfg, everyone)
+    if cmd == "capture":
+        text = " ".join(rest[1:]).strip()
+        if not text:
+            sys.exit('usage: deepwork capture "<thought>"')
+        append_capture(cfg, text)
+        return print("Captured.")
+    if cmd == "break":
+        return plan_break(cfg, float(rest[1]) if len(rest) > 1 else 10)
+    if cmd == "baseline":
+        minutes = float(rest[1]) if len(rest) > 1 else 60
+        if minutes <= 0 or (minutes < 1 and not dry):
+            sys.exit("minutes must be at least 1")
+        return start(cfg, minutes, True, goal, kind="baseline")
+    if cmd in ("questions", "edit"):
+        return edit_config(cfg)
+    if cmd == "config":
+        print("# %s%s" % (cfg.config, "" if os.path.exists(cfg.config) else " (not created yet; defaults below)"))
+        return print(json.dumps(cfg.conf, indent=2))
+    if cmd in ("help", "-h", "--help"):
+        return print(__doc__)
+    try:
+        minutes = float(cmd)
+    except ValueError:
+        sys.exit("unknown command %r. Try: deepwork help" % cmd)
+    if minutes <= 0 or (minutes < 1 and not dry):
+        sys.exit("minutes must be at least 1")
+    start(cfg, minutes, assume_yes, goal)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
