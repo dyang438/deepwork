@@ -10,7 +10,7 @@ import { GoogleButton } from "./google-button";
 // Public landing page; the dashboard lives at /app.
 export default function Home() {
   return (
-    <main className="relative min-h-screen overflow-hidden bg-ink">
+    <main className="relative flex h-dvh flex-col overflow-hidden bg-ink">
       <header className="relative z-10 flex items-center justify-between border-b border-line px-6 py-2 sm:px-8">
         <Logo className="size-16" />
       </header>
@@ -22,7 +22,7 @@ export default function Home() {
         <div className="absolute inset-0 bg-gradient-to-r from-ink via-ink/70 to-transparent" />
       </div>
 
-      <section className="relative z-10 flex min-h-[calc(100vh-61px)] flex-col justify-end px-6 pb-16 sm:px-8 sm:pb-20">
+      <section className="relative z-10 flex min-h-0 flex-1 flex-col justify-end px-6 pb-16 sm:px-8 sm:pb-20">
         <p className="eyebrow mb-5">
           Inspired by Cal Newport&apos;s <em>Deep Work: Rules for Focused Success in a Distracted World</em>
         </p>
