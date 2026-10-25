@@ -12,7 +12,7 @@ export default function Home() {
   return (
     <main className="relative min-h-screen overflow-hidden bg-ink">
       <header className="relative z-10 flex items-center justify-between border-b border-line px-6 py-4 sm:px-8">
-        <span className="flex items-center gap-2.5 text-[15px] font-semibold tracking-[-0.02em]">
+        <span className="eyebrow flex items-center gap-2.5 text-[13px] text-cream">
           <Logo className="size-7 drop-shadow-[0_0_10px_rgb(143_227_187/0.45)]" />
           godeep.work
         </span>
@@ -37,10 +37,7 @@ export default function Home() {
           <br />
           in a <Distracted text="Distracted World" />
         </h1>
-        <p className="mt-6 mb-9 max-w-lg text-[17px] leading-relaxed text-mist">
-          Log each block, watch your deep hours add up, live on every device.
-        </p>
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="mt-10 flex flex-wrap items-center gap-3">
           <GoogleButton />
           <Link className="rounded-full border border-cream/25 px-6 py-3 text-[15px] hover:border-cream/60" href="/app">
             Open dashboard
