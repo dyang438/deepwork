@@ -239,7 +239,7 @@ class TestStore(Base):
         self.run_cli("10", "-y", "-g", "local")
         r = self.run_cli("off", "-y")
         self.assertNotIn("database", r.stdout.lower())
-        self.assertIn("No database set", self.run_cli("sync").stderr)
+        self.assertIn("Nowhere to sync", self.run_cli("sync").stderr)
 
     def test_unreachable_database_keeps_local_log(self):
         self.env["DEEPWORK_DATABASE_URL"] = "postgresql://nobody@127.0.0.1:1/none?connect_timeout=2"
@@ -250,6 +250,69 @@ class TestStore(Base):
         r = self.run_cli("stats")
         self.assertIn("showing the local log", r.stderr)
         self.assertIn("offline", r.stdout)
+
+    def test_godeep_login_live_session_and_upload(self):
+        import http.server, threading
+        calls = []
+
+        class Fake(http.server.BaseHTTPRequestHandler):
+            def _reply(self, code, body):
+                data = json.dumps(body).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _handle(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n) or b"{}")
+                calls.append((self.command, self.path, self.headers.get("Authorization"), body))
+                if self.path == "/api/cli/login":
+                    return self._reply(200, {"device_code": "dev", "user_code": "ABCD-EFGH", "interval": 0.1,
+                                             "expires_in": 30, "verification_url": "http://x/cli?code=ABCD-EFGH"})
+                if self.path == "/api/cli/token":  # pending once, then approved
+                    pending = sum(1 for c in calls if c[1] == "/api/cli/token") < 2
+                    return self._reply(202, {"status": "pending"}) if pending else self._reply(200, {"token": "tok"})
+                if self.headers.get("Authorization") != "Bearer tok":
+                    return self._reply(401, {"error": "UNAUTHENTICATED"})
+                if self.path == "/api/cli/whoami":
+                    return self._reply(200, {"email": "t@x"})
+                if self.path == "/api/cli/sessions":
+                    return self._reply(200, {"synced": len(body["sessions"])})
+                return self._reply(200, {"ok": True})
+
+            do_GET = do_POST = do_PUT = do_DELETE = _handle
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fake)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        self.env["DEEPWORK_SERVER"] = "http://127.0.0.1:%d" % srv.server_port
+
+        r = self.run_cli("login")
+        self.assertIn("Your code: ABCD-EFGH", r.stdout)
+        self.assertIn("Connected as t@x", r.stdout)
+        creds = self.path("state", "credentials.json")
+        self.assertEqual(oct(os.stat(creds).st_mode & 0o777), "0o600")
+        self.assertIn("t@x on", self.run_cli("whoami").stdout)
+
+        self.run_cli("10", "-y", "-g", "web block")
+        time.sleep(1.5)  # the watchdog announces the session
+        put = [c for c in calls if c[:2] == ("PUT", "/api/cli/active")]
+        self.assertEqual(put[0][3]["goal"], "web block")
+        r = self.run_cli("off", stdin="")
+        self.assertIn("On your godeep.work dashboard.", r.stdout)
+        self.assertTrue(any(c[:2] == ("DELETE", "/api/cli/active") for c in calls))
+        up = [c for c in calls if c[1] == "/api/cli/sessions"][-1][3]["sessions"]
+        self.assertEqual((len(up), up[0]["goal"], up[0]["outcome"]), (1, "web block", "not done"))
+        self.assertEqual(self.run_cli("sync").stdout.strip(), "Synced 1 session(s) to godeep.work.")
+        self.assertEqual(up[0]["id"], [c for c in calls if c[1] == "/api/cli/sessions"][-1][3]["sessions"][0]["id"])
+
+        self.run_cli("logout")
+        self.assertFalse(os.path.exists(creds))
 
     @unittest.skipUnless(shutil.which("initdb") and shutil.which("pg_ctl") and shutil.which("psql"), "no local Postgres")
     def test_postgres_mirror(self):

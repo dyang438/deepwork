@@ -11,7 +11,7 @@ export function UserMenu({ email }: { readonly email: string }) {
   }
 
   return (
-    <nav className="absolute inset-x-0 top-0 z-10 mx-auto flex w-full max-w-3xl items-center justify-end gap-3 px-5 pt-5 text-[13px] text-mist">
+    <nav className="flex items-center gap-3 text-[13px] text-mist">
       <span className="truncate">{email}</span>
       <button
         className="cursor-pointer rounded-full border border-cream/25 px-3.5 py-1.5 font-medium text-cream hover:border-cream/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-mint"

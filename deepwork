@@ -6,7 +6,10 @@
   deepwork status         show the current session
   deepwork stats          deep hours today, this week, per goal (--all includes everyone in the store)
   deepwork capture "..."  append a stray thought to the capture file
-  deepwork sync           push the local log to the database (database_url in settings)
+  deepwork sync           push the local log to godeep.work and/or the database (database_url in settings)
+  deepwork login [url]    connect this terminal to your godeep.work account (default https://godeep.work)
+  deepwork logout         forget that connection
+  deepwork whoami         show which account this terminal is connected to
   deepwork questions      edit your settings in $EDITOR
   deepwork config         print your settings
 Flags: -y (skip questions), -g "goal", --dry-run (no apps quit, no DND, isolated state in ~/.deepwork-dryrun).
@@ -25,6 +28,9 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
+import uuid
 
 SHORTCUT_ON, SHORTCUT_OFF = "deepwork-on", "deepwork-off"
 DEFAULT_MIN = 90
@@ -32,6 +38,7 @@ REQUIT_EVERY = 3
 SAMPLE_EVERY = float(os.environ.get("DEEPWORK_SAMPLE_EVERY", "10"))
 ACTIVE_WITHIN = 60  # a sample is active if there was keyboard or mouse input in the last 60 s
 CHROME = "Google Chrome"
+DEFAULT_SERVER = "https://godeep.work"
 
 # Settings live in ~/.deepwork/config.json. A question set to false (or deleted) is skipped; a string replaces
 # its wording; "custom" adds your own questions (answers are logged).
@@ -53,6 +60,7 @@ DEFAULT_CONFIG = {
         "done": "One line on what got done: ",
         "open_loops": "Open loops, one per line (empty line to finish):",
         "tomorrow": "Tomorrow's main deep block (what and when): ",
+        "focus": "How focused were you, 0-100%? (Enter skips): ",
         "custom": [],
     },
 }
@@ -163,12 +171,94 @@ class Cfg:
         self.tracking = bool(self.conf["tracking"])
         # Dry runs never touch the configured database; tests point one in through the environment.
         self.database_url = os.environ.get("DEEPWORK_DATABASE_URL") or (None if dry else self.conf["database_url"])
+        self.credentials = os.path.join(os.path.dirname(self.config), "credentials.json")
+        self.web = Web(self)
         self.store = Store(self)
 
     def ensure_dirs(self):
         os.makedirs(self.sessions, exist_ok=True)
         for p in (self.log, self.capture):
             os.makedirs(os.path.dirname(p), exist_ok=True)
+
+
+# ---------- godeep.work: sign in once, then sessions start and land on the web dashboard ----------
+
+class Web:
+    """Talks to godeep.work with the token from `deepwork login`. Every call is best effort: the local log is
+    the source of truth, and the whole log is re-sent (idempotently) on the next sync."""
+
+    def __init__(self, cfg):
+        self.path = cfg.credentials
+        creds = read_json(self.path) or {}
+        self.server = os.environ.get("DEEPWORK_SERVER") or creds.get("server")
+        # Dry runs never touch the real account; tests point a server in through the environment.
+        self.token = creds.get("token") if (not cfg.dry or os.environ.get("DEEPWORK_SERVER")) else None
+
+    @property
+    def enabled(self):
+        return bool(self.server and self.token)
+
+    def call(self, method, path, body=None, token=True, timeout=8):
+        req = urllib.request.Request(self.server.rstrip("/") + path, method=method,
+                                     data=None if body is None else json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json", "User-Agent": "deepwork-cli"})
+        if token:
+            req.add_header("Authorization", "Bearer " + self.token)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            if e.code == 401 and token:
+                raise RuntimeError("godeep.work no longer accepts this terminal; run: deepwork login")
+            return e.code, json.loads(e.read() or b"{}")
+
+    def active(self, s):
+        self.call("PUT", "/api/cli/active", {"goal": s.get("goal") or "(none given)", "started_at": iso(s["start"]),
+                                             "ends_at": iso(s["end"])}, timeout=4)
+
+    def clear(self):
+        self.call("DELETE", "/api/cli/active", timeout=4)
+
+    def sync(self, records):
+        rows = [{"id": str(uuid.uuid5(uuid.NAMESPACE_URL, "deepwork:" + record_id(r))),
+                 "goal": (r.get("goal") or "(none given)")[:200], "minutes": int(round(float(r.get("minutes") or 0))),
+                 "outcome": r.get("outcome") if r.get("outcome") in ("done", "partial", "not done") else "unrecorded",
+                 "started_at": r["start"], "focus_pct": r.get("focus_pct")}
+                for r in records if r.get("kind", "deep") == "deep" and r.get("start")]
+        code, body = self.call("POST", "/api/cli/sessions", {"sessions": rows}, timeout=20)
+        if code != 200:
+            raise RuntimeError("godeep.work refused the upload (%s): %s" % (code, body.get("error")))
+        return body["synced"]
+
+
+def login(cfg, server):
+    web = cfg.web
+    web.server = server
+    code, start_ = web.call("POST", "/api/cli/login", token=False)
+    if code != 200:
+        sys.exit("Couldn't reach %s (%s)." % (server, code))
+    print("Your code: %s" % start_["user_code"], flush=True)
+    print("Confirm it in your browser: %s" % start_["verification_url"], flush=True)
+    if not cfg.dry and not os.environ.get("DEEPWORK_NO_BROWSER"):
+        subprocess.run(["open", start_["verification_url"]], capture_output=True)
+    deadline = now() + start_["expires_in"]
+    while now() < deadline:
+        time.sleep(start_.get("interval", 2))
+        code, body = web.call("POST", "/api/cli/token", {"device_code": start_["device_code"]}, token=False)
+        if code == 200 and body.get("token"):
+            break
+        if code != 202:
+            sys.exit("Login failed: %s" % body.get("error", code))
+    else:
+        sys.exit("Login timed out. Run deepwork login again.")
+    os.makedirs(os.path.dirname(cfg.credentials), exist_ok=True)
+    fd = os.open(cfg.credentials, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"server": server, "token": body["token"]}, f)
+    web.token = body["token"]
+    print("Connected as %s." % web.call("GET", "/api/cli/whoami")[1].get("email"))
+    if cfg.store.local():
+        print("Uploaded %d past session(s)." % web.sync(cfg.store.local()))
 
 
 # ---------- storage: a local log, mirrored to Postgres when database_url is set ----------
@@ -188,6 +278,7 @@ class Store:
     def __init__(self, cfg):
         self.log = cfg.log
         self.url = cfg.database_url
+        self.web = cfg.web
 
     def local(self):
         return read_jsonl(self.log)
@@ -195,11 +286,19 @@ class Store:
     def add(self, rec):
         with open(self.log, "a") as f:
             f.write(json.dumps(rec) + "\n")
+        notes = []
         if self.url:
             try:
-                return "Synced %d session(s) to the database." % self.sync()
+                notes.append("Synced %d session(s) to the database." % self.sync())
             except Exception as e:
-                return "Database sync failed (%s); saved locally, retried on the next sync." % e
+                notes.append("Database sync failed (%s); saved locally, retried on the next sync." % e)
+        if self.web.enabled:
+            try:
+                self.web.sync(self.local())
+                notes.append("On your godeep.work dashboard.")
+            except Exception as e:
+                notes.append("godeep.work sync failed (%s); saved locally, retried on the next sync." % e)
+        return "\n".join(notes)
 
     def records(self):
         if not self.url:
@@ -353,6 +452,11 @@ def claim_and_restore(cfg, ended_by):
     s = read_json(cfg.pending) or {}
     s.update(ended=now(), ended_by=ended_by)
     write_json(cfg.pending, s)
+    if cfg.web.enabled:
+        try:
+            cfg.web.clear()
+        except Exception as e:
+            sys.stderr.write("deepwork: couldn't clear the live session on godeep.work: %s\n" % e)
     act(cfg, "shortcut", SHORTCUT_OFF)
     for a in s.get("apps_running", cfg.apps):
         act(cfg, "open", a)
@@ -395,6 +499,7 @@ def shutdown(cfg, assume_yes):
 def _shutdown(cfg, assume_yes, s):
     ended = s.get("ended", now())
     outcome, done, loops, tomorrow, answers = "unrecorded", "", [], "", dict(s.get("answers") or {})
+    focus = None
     q = cfg.conf["shutdown_questions"]
     if not assume_yes and any(q.values()):
         print("Session over. Goal was: %s" % s.get("goal"))
@@ -412,6 +517,9 @@ def _shutdown(cfg, assume_yes, s):
                 loops.append(line)
         if q.get("tomorrow"):
             tomorrow = ask(q["tomorrow"])
+        if q.get("focus"):
+            f = ask(q["focus"]).rstrip("%").strip()
+            focus = max(0, min(100, int(f))) if f.isdigit() else None
         for c in q.get("custom") or []:
             answers[c] = ask(c.rstrip() + " ")
     for line in loops:
@@ -422,6 +530,7 @@ def _shutdown(cfg, assume_yes, s):
         "minutes": round((ended - start_ts) / 60, 1), "planned_minutes": s.get("planned_minutes"),
         "goal": s.get("goal"), "deadline": s.get("deadline"), "checklist": s.get("checklist"),
         "outcome": outcome, "done": done, "open_loops": loops, "tomorrow": tomorrow, "answers": answers,
+        "focus_pct": focus,
         "ended_by": s.get("ended_by", "off"),
         "activity": summarize(read_jsonl(s["samples_path"])) if s.get("samples_path") else None,
     }
@@ -705,6 +814,11 @@ def watchdog(cfg):
     serve_state(cfg, rec)
     if cfg.tracking:
         threading.Thread(target=sampler, args=(cfg, rec), daemon=True).start()
+    if cfg.web.enabled and s0:
+        try:
+            cfg.web.active(s0)
+        except Exception as e:
+            print("%s couldn't show the session on godeep.work: %s" % (iso(now()), e), flush=True)
     while True:
         s = read_json(cfg.session)
         if not s:
@@ -767,12 +881,28 @@ def main(argv):
         append_capture(cfg, text)
         return print("Captured.")
     if cmd == "sync":
-        if not cfg.database_url:
-            sys.exit('No database set. Add "database_url": "postgres://..." with: deepwork questions')
+        if not (cfg.database_url or cfg.web.enabled):
+            sys.exit('Nowhere to sync. Run deepwork login, or add "database_url" with: deepwork questions')
         try:
-            return print("Synced %d session(s) to the database." % cfg.store.sync())
+            if cfg.database_url:
+                print("Synced %d session(s) to the database." % cfg.store.sync())
+            if cfg.web.enabled:
+                print("Synced %d session(s) to godeep.work." % cfg.web.sync(cfg.store.local()))
+            return
         except Exception as e:
             sys.exit("Sync failed: %s" % e)
+    if cmd == "login":
+        return login(cfg, rest[1] if len(rest) > 1 else os.environ.get("DEEPWORK_SERVER", DEFAULT_SERVER))
+    if cmd == "logout":
+        rm(cfg.credentials)
+        return print("Disconnected this terminal from godeep.work.")
+    if cmd == "whoami":
+        if not cfg.web.enabled:
+            return print("Not connected. Run: deepwork login")
+        try:
+            return print("%s on %s" % (cfg.web.call("GET", "/api/cli/whoami")[1].get("email"), cfg.web.server))
+        except Exception as e:
+            sys.exit(str(e))
     if cmd in ("questions", "edit"):
         return edit_config(cfg)
     if cmd == "config":

@@ -135,7 +135,7 @@ export function Distracted({ text }: { text: string }) {
       );
       if (tick++ >= ticks) return;
       timer = setTimeout(step, delay);
-      delay *= 1.13; // ~30 ms between frames at the start, ~400 ms by the end; about 3 s in all
+      delay *= 1.168; // ~30 ms between frames at the start, ~780 ms for the last one; about 5 s in all
     };
     step();
     return () => clearTimeout(timer);

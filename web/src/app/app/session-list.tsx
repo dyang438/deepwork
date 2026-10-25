@@ -9,10 +9,13 @@ import { leaveSession, renewOrLeave } from "@/auth/session-lost";
 import type { SessionRow } from "@/lib/sessions"; // type-only: no server code reaches the browser
 
 import { LocalTime } from "../local-time";
-import { deleteSession, logSession, type WriteResult } from "./actions";
+import { deleteSession, logSession, setFocus, type WriteResult } from "./actions";
 
 type OptimisticRow = SessionRow & { pending?: true };
-type OptimisticAction = { type: "add"; row: SessionRow } | { type: "delete"; id: string };
+type OptimisticAction =
+  | { type: "add"; row: SessionRow }
+  | { type: "delete"; id: string }
+  | { type: "focus"; id: string; focus_pct: number | null };
 type Notice = { tone: "error" | "info"; text: string };
 
 // React re-applies pending actions to every new live snapshot, so each case must be safe to re-run.
@@ -22,6 +25,8 @@ function applyOptimisticAction(rows: readonly OptimisticRow[], action: Optimisti
       return rows.some((r) => r.id === action.row.id) ? rows : [{ ...action.row, pending: true }, ...rows];
     case "delete":
       return rows.filter((r) => r.id !== action.id);
+    case "focus":
+      return rows.map((r) => (r.id === action.id && r.focus_pct !== action.focus_pct ? { ...r, focus_pct: action.focus_pct, pending: true } : r));
   }
 }
 
@@ -30,6 +35,7 @@ const newestFirst = (a: OptimisticRow, b: OptimisticRow) =>
   b.started_at.getTime() - a.started_at.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
 
 const SYNC_TIMEOUT_MS = 10_000;
+const FOCUS_STEPS = [100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0];
 
 function weekStart(now = new Date()) {
   const d = new Date(now);
@@ -108,12 +114,13 @@ export function SessionList({
     const goal = String(fd.get("goal") ?? "").trim();
     const minutes = Number(fd.get("minutes"));
     const outcome = String(fd.get("outcome")) as SessionRow["outcome"];
+    const focus_pct = fd.get("focus") ? Number(fd.get("focus")) : null;
     if (!goal || !Number.isInteger(minutes) || minutes < 1) return;
     form.reset();
-    const row: SessionRow = { id: crypto.randomUUID(), goal, minutes, outcome, started_at: new Date() };
+    const row: SessionRow = { id: crypto.randomUUID(), goal, minutes, outcome, focus_pct, started_at: new Date() };
     mutate(
       { type: "add", row },
-      () => logSession(userId, { id: row.id, goal, minutes, outcome: outcome as "done" | "partial" | "not done" }),
+      () => logSession(userId, { id: row.id, goal, minutes, outcome: outcome as "done" | "partial" | "not done", focus_pct }),
       `Couldn't log "${goal}".`,
     );
   }
@@ -147,6 +154,12 @@ export function SessionList({
           <option value="partial">Partial</option>
           <option value="not done">Not done</option>
         </select>
+        <select aria-label="Focus" className={input} defaultValue="" name="focus">
+          <option value="">Focus %</option>
+          {FOCUS_STEPS.map((f) => (
+            <option key={f} value={f}>{f}%</option>
+          ))}
+        </select>
         <button className="cursor-pointer rounded-full bg-cream px-5 py-2.5 font-medium text-ink hover:bg-white" type="submit">
           Log session
         </button>
@@ -173,13 +186,27 @@ export function SessionList({
         <ul aria-live="polite" className="my-6 list-none border-t border-line p-0">
           {rows.map((r) => (
             <li
-              className={`grid grid-cols-[1fr_auto_auto_auto] items-center gap-5 border-b border-line py-4 ${r.pending ? "opacity-50" : ""}`}
+              className={`grid grid-cols-[1fr_auto_auto_auto_auto] items-center gap-5 border-b border-line py-4 ${r.pending ? "opacity-50" : ""}`}
               key={r.id}
             >
               <span className="min-w-0 break-words">{r.goal}</span>
               <span className="font-mono text-xs text-mist tabular-nums">
-                {r.minutes} MIN · <span className={r.outcome === "done" ? "text-mint" : r.outcome === "partial" ? "text-ochre" : "text-rose"}>{r.outcome.toUpperCase()}</span>
+                {r.minutes} MIN · <span className={r.outcome === "done" ? "text-mint" : r.outcome === "partial" ? "text-ochre" : r.outcome === "not done" ? "text-rose" : "text-mist"}>{r.outcome.toUpperCase()}</span>
               </span>
+              <select
+                aria-label={`Focus for ${r.goal}`}
+                className={`cursor-pointer rounded-full border border-line bg-transparent px-2 py-1 font-mono text-xs ${r.focus_pct == null ? "text-mist" : "text-cream"}`}
+                onChange={(e) => {
+                  const focus_pct = e.target.value === "" ? null : Number(e.target.value);
+                  mutate({ type: "focus", id: r.id, focus_pct }, () => setFocus(userId, { id: r.id, focus_pct }), `Couldn't rate "${r.goal}".`);
+                }}
+                value={r.focus_pct ?? ""}
+              >
+                <option value="">FOCUS –</option>
+                {FOCUS_STEPS.map((f) => (
+                  <option key={f} value={f}>FOCUS {f}%</option>
+                ))}
+              </select>
               <span className="text-xs text-mist">
                 <LocalTime date={r.started_at} />
               </span>

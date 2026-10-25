@@ -4,11 +4,11 @@ export function Logo({ className = "size-6" }: { className?: string }) {
     <svg
       aria-hidden="true"
       className={className}
-      viewBox="4 4 56 56"
+      viewBox="5 15 54 54"
       xmlns="http://www.w3.org/2000/svg"
     >
-      <path d="M32 59A21 21 0 1 1 39.2 57.7L32 38Z" fill="#8fe3bb" />
-      <g transform="translate(32 38)">
+      <path d="M32 56A25 9 0 1 1 40.5 55.5L32 47Z" fill="#8fe3bb" />
+      <g transform="translate(32 45) scale(1.15)">
         <g fill="#f8c6d2">
           <path
             d="M0 0C-4.6-6-4-14 0-19C4-14 4.6-6 0 0Z"

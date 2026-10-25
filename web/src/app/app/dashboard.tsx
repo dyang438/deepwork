@@ -2,11 +2,11 @@ import { redirect } from "next/navigation";
 import { connection } from "next/server";
 
 import { getUser } from "@/auth/server";
-import { UserMenu } from "@/auth/user-menu";
 import { getEnv } from "@/lib/env";
-import { loadSessions } from "@/lib/sessions";
+import { loadActive, loadSessions } from "@/lib/sessions";
 
 import { RealtimeRoot } from "../realtime-root";
+import { ActiveBanner } from "./active-banner";
 import { SessionList } from "./session-list";
 
 export async function Dashboard() {
@@ -14,11 +14,11 @@ export async function Dashboard() {
   await connection();
   const user = await getUser();
   if (!user) redirect("/auth/sign-in"); // backstop: proxy.ts already redirected signed-out page loads
-  const { rows, sealedQuery } = await loadSessions(user.id);
+  const [{ rows, sealedQuery }, active] = await Promise.all([loadSessions(user.id), loadActive(user.id)]);
   return (
     <>
-      <UserMenu email={user.email} />
       <RealtimeRoot key={sealedQuery.queryFingerprint} url={getEnv().realtimeUrl}>
+        <ActiveBanner initial={active.rows} sealedQuery={active.sealedQuery} userId={user.id} />
         <SessionList initialSessions={rows} sealedQuery={sealedQuery} userId={user.id} />
       </RealtimeRoot>
     </>

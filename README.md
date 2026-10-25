@@ -42,7 +42,9 @@ ln -sf ~/deepwork/deepwork ~/.local/bin/deepwork   # any directory on your PATH
 | `deepwork status` | time left |
 | `deepwork stats [--all]` | deep hours and focus metrics |
 | `deepwork capture "..."` | jot down a stray thought without leaving the session |
-| `deepwork sync` | push the local log to the database |
+| `deepwork sync` | push the local log to godeep.work and/or the database |
+| `deepwork login` | connect this terminal to your [godeep.work](https://godeep.work) account |
+| `deepwork logout` / `whoami` | disconnect / show the connected account |
 | `deepwork questions` | edit your settings in `$EDITOR` (falls back to nvim, vim, vi) |
 | `deepwork config` | print your settings |
 
@@ -70,6 +72,7 @@ Flags: `-y` skips the questions, `-g "goal"` sets the goal, `--dry-run` does eve
     "done": "One line on what got done: ",
     "open_loops": "Open loops, one per line (empty line to finish):",
     "tomorrow": "Tomorrow's main deep block (what and when): ",
+    "focus": "How focused were you, 0-100%? (Enter skips): ",
     "custom": []
   }
 }
@@ -80,9 +83,19 @@ Flags: `-y` skips the questions, `-g "goal"` sets the goal, `--dry-run` does eve
 - `tracking` samples the front app, the active Chrome site (domain only) and blocked-site attempts every 10 seconds, for the stats. Set it to `false` to record nothing.
 - `database_url` takes a Postgres connection string (`postgres://user:pass@host:5432/db`; Supabase, Neon and RDS all work). Every session is still written to the local log first. Shutdown then upserts the log into a `deepwork_sessions` table (created on first use), and `stats` reads from the table. If the database is unreachable, nothing is lost: the next shutdown or `deepwork sync` catches it up.
 
+## godeep.work
+
+[godeep.work](https://godeep.work) is the web dashboard. Run `deepwork login` once: the terminal shows a code, your browser opens, you confirm it while signed in (Google or email), and the CLI stores a token in `~/.deepwork/credentials.json` (readable only by you). After that:
+
+- `deepwork 90` shows the block live on the dashboard ("in a deep work block, until 16:30"), and clears it when the block ends.
+- Each finished session is uploaded with its goal, minutes, outcome and self-reported focus; the local log stays the source of truth, and `deepwork sync` re-sends it safely (no duplicates).
+- **My competitions** ranks members by deep hours and minute-weighted self-reported focus since the competition started, live. Start one and share its invite link.
+
+The web app lives in `web/` (Next.js on Vercel, with Neon Postgres, Auth and Realtime).
+
 ## Privacy
 
-Everything stays on your Mac in `~/.deepwork`: the log, the samples and your captures. The only exception is `database_url`: if you set it, each session record (goal, times, answers and the activity summary, which lists your top apps and sites) is sent to that database. Raw samples never leave the Mac. The extension only talks to deepwork on `127.0.0.1` and never sends paths, page titles or content.
+Everything stays on your Mac in `~/.deepwork`: the log, the samples and your captures. The only exception is `database_url`: if you set it, each session record (goal, times, answers and the activity summary, which lists your top apps and sites) is sent to that database. Raw samples never leave the Mac. The same goes for godeep.work: once you run `deepwork login`, only each session's goal, start time, minutes, outcome and focus rating are sent. The extension only talks to deepwork on `127.0.0.1` and never sends paths, page titles or content.
 
 ## Contributing
 

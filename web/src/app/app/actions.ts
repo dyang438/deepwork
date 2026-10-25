@@ -18,7 +18,9 @@ const addInput = z.object({
   goal: z.string().trim().min(1).max(200),
   minutes: z.number().int().min(1).max(600),
   outcome: z.enum(["done", "partial", "not done"]),
+  focus_pct: z.number().int().min(0).max(100).nullable(),
 });
+const focusInput = z.object({ id: z.uuid(), focus_pct: z.number().int().min(0).max(100).nullable() });
 const deleteInput = z.object({ id: z.uuid() });
 
 const txid = sql<string>`pg_current_xact_id()::text`;
@@ -45,6 +47,19 @@ export async function deleteSession(pageUserId: string, raw: z.input<typeof dele
   if (!input.success) return { kind: "rejected", reason: "INVALID_INPUT" };
   const [row] = await getDb()
     .delete(deepSessions)
+    .where(and(eq(deepSessions.id, input.data.id), eq(deepSessions.user_id, user.id)))
+    .returning({ txid });
+  return toResult(row);
+}
+
+export async function setFocus(pageUserId: string, raw: z.input<typeof focusInput>): Promise<WriteResult> {
+  const user = await getUser(pageUserId);
+  if (!user) return { kind: "rejected", reason: "UNAUTHENTICATED" };
+  const input = focusInput.safeParse(raw);
+  if (!input.success) return { kind: "rejected", reason: "INVALID_INPUT" };
+  const [row] = await getDb()
+    .update(deepSessions)
+    .set({ focus_pct: input.data.focus_pct })
     .where(and(eq(deepSessions.id, input.data.id), eq(deepSessions.user_id, user.id)))
     .returning({ txid });
   return toResult(row);
