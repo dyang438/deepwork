@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, useTransition } from "react";
 
@@ -88,9 +87,6 @@ export function SettingsGear({ defaults }: { defaults: Defaults }) {
             </label>
             {error && <p className="mb-4 text-sm text-rose" role="alert">{error}</p>}
             <div className="flex items-center justify-end gap-4">
-              <Link className="mr-auto text-sm text-mist hover:text-cream" href="/app/setup" onClick={() => setOpen(false)}>
-                Setup guide
-              </Link>
               <button className="cursor-pointer text-sm text-mist hover:text-cream" onClick={() => setOpen(false)} type="button">
                 Cancel
               </button>

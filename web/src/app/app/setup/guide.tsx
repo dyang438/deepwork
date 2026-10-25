@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { type ReactNode, useEffect, useState } from "react";
 
 import type { SetupStatus } from "@/lib/setup";
@@ -105,12 +104,6 @@ export function SetupGuide({ initial, page = false }: { initial: SetupStatus; pa
       <p className="m-0 border-t border-line pt-4 text-sm text-mist">
         Then start a block here with <kbd className="rounded border border-line border-b-2 px-1.5 font-mono text-xs text-cream">+</kbd>,
         or in your terminal with <code className="font-mono text-cream">deepwork 90</code>.
-        {!page && (
-          <>
-            {" "}
-            This guide stays at <Link className="text-cream underline" href="/app/setup">Setup</Link>.
-          </>
-        )}
       </p>
     </section>
   );

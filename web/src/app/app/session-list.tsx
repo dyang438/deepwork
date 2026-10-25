@@ -29,6 +29,7 @@ import {
   updateSession,
   type WriteResult,
 } from "./actions";
+import { ConfirmDelete } from "./confirm-delete";
 import { SessionDrawer, type SessionEdit } from "./session-drawer";
 
 type OptimisticRow = SessionRow & { pending?: true };
@@ -184,6 +185,7 @@ export function SessionList({
   // Keyboard, outside text fields: + (or =) opens the composer; j / k move through sessions, Enter opens one.
   const [sel, setSel] = useState(-1);
   const [editing, setEditing] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<OptimisticRow | null>(null); // the delete dialog
   const keys = useRef({
     rows: [] as readonly OptimisticRow[],
     sel,
@@ -207,6 +209,7 @@ export function SessionList({
       else if (e.key === "j") setSel(Math.min(k.sel + 1, k.rows.length - 1));
       else if (e.key === "k") setSel(Math.max(k.sel - 1, 0));
       else if (e.key === "Enter" && k.rows[k.sel]) setEditing(k.rows[k.sel].id);
+      else if (e.key === "d" && k.rows[k.sel]) setConfirming(k.rows[k.sel]);
       else return;
       e.preventDefault();
     };
@@ -564,14 +567,11 @@ export function SessionList({
               </span>
               <button
                 aria-label={`Delete ${r.goal}`}
-                className="cursor-pointer bg-transparent p-2 text-xs text-mist hover:text-rose"
+                className="cursor-pointer rounded-md border border-transparent bg-transparent px-2 py-1 text-xs text-mist transition hover:border-rose/70 hover:text-rose"
                 onClick={(e) => {
                   e.stopPropagation();
-                  mutate(
-                    { type: "delete", id: r.id },
-                    () => deleteSession(userId, { id: r.id }),
-                    `Couldn't delete "${r.goal}".`,
-                  );
+                  setSel(i);
+                  setConfirming(r);
                 }}
                 type="button"
               >
@@ -580,6 +580,21 @@ export function SessionList({
             </li>
           ))}
         </ul>
+      )}
+      {confirming && (
+        <ConfirmDelete
+          goal={confirming.goal}
+          onCancel={() => setConfirming(null)}
+          onConfirm={() => {
+            const r = confirming;
+            setConfirming(null);
+            mutate(
+              { type: "delete", id: r.id },
+              () => deleteSession(userId, { id: r.id }),
+              `Couldn't delete "${r.goal}".`,
+            );
+          }}
+        />
       )}
       {editingRow && (
         <SessionDrawer
