@@ -24,11 +24,7 @@ export function TodayStrip({ rows, onOpen }: { rows: readonly SessionRow[]; onOp
 
   const today = rows.filter((r) => r.started_at.toDateString() === now.toDateString());
   const startHour = Math.min(7, now.getHours(), ...today.map((r) => r.started_at.getHours()));
-  const endHour = Math.max(
-    20,
-    now.getHours() + 1,
-    ...today.map((r) => Math.min(24, Math.ceil(r.started_at.getHours() + (r.started_at.getMinutes() + r.minutes) / 60))),
-  );
+  const endHour = 24; // the day runs to midnight
   const hours = Array.from({ length: endHour - startHour }, (_, i) => startHour + i);
   const span = hours.length;
   // Positions are percentages of the column, so the day stretches to whatever height the strip gets.
