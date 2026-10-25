@@ -47,6 +47,9 @@ export default function Home() {
         </div>
         <p className="eyebrow mt-16 border-t border-line pt-5 text-[11px] normal-case">
           Vincent van Gogh, <em>Roses</em>, 1890 · National Gallery of Art, Washington · Open Access
+          <span className="float-right">
+            <Link className="hover:text-cream" href="/privacy">Privacy</Link> · <Link className="hover:text-cream" href="/terms">Terms</Link>
+          </span>
         </p>
       </section>
     </main>

@@ -23,10 +23,10 @@ export function TodayStrip({ rows, onOpen }: { rows: readonly SessionRow[]; onOp
   if (!now) return null; // the browser's clock and time zone decide what "today" is
 
   const today = rows.filter((r) => r.started_at.toDateString() === now.toDateString());
-  const startHour = Math.min(7, now.getHours(), ...today.map((r) => r.started_at.getHours()));
+  const startHour = 0;
   const endHour = 24; // the day runs to midnight
-  const hours = Array.from({ length: endHour - startHour }, (_, i) => startHour + i);
-  const span = hours.length;
+  const hours = Array.from({ length: endHour - startHour + 1 }, (_, i) => startHour + i);
+  const span = endHour - startHour;
   // Positions are percentages of the column, so the day stretches to whatever height the strip gets.
   const pct = (h: number) => `${(h / span) * 100}%`;
   const y = (d: Date) => pct(d.getHours() - startHour + d.getMinutes() / 60);
