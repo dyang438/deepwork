@@ -24,6 +24,12 @@ Deep work until 16:30 (90 min). Goal: ship the parser
 Requires macOS, `python3` and Google Chrome (for site blocking).
 
 ```bash
+curl -fsSL https://godeep.work/install.sh | sh
+```
+
+That clones this repo to `~/deepwork` (or updates it) and links `deepwork` into `~/.local/bin`. By hand:
+
+```bash
 git clone https://github.com/dyang438/deepwork.git ~/deepwork
 ln -sf ~/deepwork/deepwork ~/.local/bin/deepwork   # any directory on your PATH
 ```

@@ -5,9 +5,11 @@ import { getUser } from "@/auth/server";
 import { getEnv } from "@/lib/env";
 import { loadActive, loadAgent, loadSessions } from "@/lib/sessions";
 import { getDefaults } from "@/lib/settings";
+import { getSetupStatus } from "@/lib/setup";
 
 import { RealtimeRoot } from "../realtime-root";
 import { SessionList } from "./session-list";
+import { SetupGuide } from "./setup/guide";
 
 export async function Dashboard() {
   // Request time only: the sealed query is a bearer token for this user's data, never prerender it.
@@ -20,8 +22,10 @@ export async function Dashboard() {
     loadAgent(user.id),
     getDefaults(user.id),
   ]);
+  const setup = await getSetupStatus(user.id);
   return (
     <>
+      <SetupGuide initial={setup} />
       <RealtimeRoot key={sealedQuery.queryFingerprint} url={getEnv().realtimeUrl}>
         <SessionList active={active} agent={agent} defaults={defaults} initialSessions={rows} sealedQuery={sealedQuery} userId={user.id} />
       </RealtimeRoot>
