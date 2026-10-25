@@ -189,7 +189,7 @@ export function SessionList({
   const [confirming, setConfirming] = useState<OptimisticRow | null>(null); // the delete dialog
   // Which view the Personal tab shows: the overview, the session history (h / Down), or the calendar (c).
   const [view, setView] = useState<"overview" | "history">("overview");
-  const [showToday, setShowToday] = useState(true);
+  const [showToday, setShowToday] = useState(false); // the today timeline: hidden until c (or Calendar)
   const history = view === "history";
   const setHistory = (on: boolean) => setView(on ? "history" : "overview");
   const keys = useRef({

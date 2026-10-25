@@ -9,7 +9,7 @@ const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 const geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-geist-mono" });
 
 export const metadata: Metadata = {
-  title: "deepwork.garden",
+  title: "The Garden",
   description: "Timed deep work blocks. Log each block and watch your deep hours add up.",
 };
 
