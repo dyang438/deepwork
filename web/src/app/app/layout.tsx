@@ -8,12 +8,21 @@ import { getUser } from "@/auth/server";
 import { UserMenu } from "@/auth/user-menu";
 import { Logo } from "@/components/logo";
 
+import { getDefaults } from "@/lib/settings";
+
+import { SettingsGear } from "./settings/gear";
 import { Tabs } from "./tabs";
 
 async function Account() {
   await connection();
   const user = await getUser();
   return user ? <UserMenu email={user.email} /> : null;
+}
+
+async function Gear() {
+  await connection();
+  const user = await getUser();
+  return user ? <SettingsGear defaults={await getDefaults(user.id)} /> : null;
 }
 
 // Shared frame for the signed-in pages: the painting band, and the Personal / My competitions bar.
@@ -39,6 +48,9 @@ export default function AppLayout({ children }: { children: ReactNode }) {
         </header>
         {children}
       </div>
+      <Suspense>
+        <Gear />
+      </Suspense>
     </main>
   );
 }

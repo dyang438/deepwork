@@ -3,10 +3,11 @@
 import type { SealedLiveQuery } from "@neon/realtime/client";
 // @neon/realtime-react's build has no "use client" directive: import it only from client modules.
 import { useLiveQuery } from "@neon/realtime-react";
-import { type FormEvent, startTransition, useCallback, useMemo, useOptimistic, useState } from "react";
+import { type FormEvent, startTransition, useCallback, useEffect, useMemo, useOptimistic, useState } from "react";
 
 import { leaveSession, renewOrLeave } from "@/auth/session-lost";
 import type { SessionRow } from "@/lib/sessions"; // type-only: no server code reaches the browser
+import type { Defaults } from "@/lib/settings";
 
 import { LocalTime } from "../local-time";
 import { deleteSession, logSession, setFocus, type WriteResult } from "./actions";
@@ -45,10 +46,12 @@ function weekStart(now = new Date()) {
 }
 
 export function SessionList({
+  defaults,
   initialSessions,
   sealedQuery,
   userId,
 }: {
+  defaults: Defaults;
   initialSessions: SessionRow[];
   sealedQuery: SealedLiveQuery<SessionRow>;
   userId: string;
@@ -71,6 +74,20 @@ export function SessionList({
   );
   const rows = useMemo(() => [...optimistic].sort(newestFirst), [optimistic]);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [composing, setComposing] = useState(false);
+
+  // Typing + (or =, the same key unshifted) anywhere outside a text field opens the composer.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if ((e.key !== "+" && e.key !== "=") || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || document.querySelector('[role="dialog"]')) return;
+      e.preventDefault();
+      setComposing(true);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const week = useMemo(() => {
     const since = weekStart();
@@ -117,6 +134,7 @@ export function SessionList({
     const focus_pct = fd.get("focus") ? Number(fd.get("focus")) : null;
     if (!goal || !Number.isInteger(minutes) || minutes < 1) return;
     form.reset();
+    setComposing(false);
     const row: SessionRow = { id: crypto.randomUUID(), goal, minutes, outcome, focus_pct, started_at: new Date() };
     mutate(
       { type: "add", row },
@@ -125,9 +143,9 @@ export function SessionList({
     );
   }
 
-  const input =
-    "rounded-full border border-line bg-panel px-4 py-2.5 text-cream outline-none placeholder:text-mist/60 focus:border-mint/70 focus:ring-2 focus:ring-mint/20";
-  const liveText = status === "live" ? "Live" : status === "error" ? "Live updates stopped" : status;
+  // Inline text controls for the composer: no boxes, just mono text that reads like a sentence.
+  const quiet =
+    "cursor-pointer appearance-none border-0 border-b border-transparent bg-transparent p-0 font-mono text-xs uppercase text-mist outline-none [field-sizing:content] hover:text-cream focus:border-mint/60 focus:text-cream";
 
   return (
     <section>
@@ -146,32 +164,72 @@ export function SessionList({
         ))}
       </dl>
 
-      <form className="flex flex-wrap gap-2" onSubmit={logFromForm}>
-        <input aria-label="Goal" autoComplete="off" className={`${input} min-w-0 flex-1`} maxLength={200} name="goal" placeholder="What did this block produce?" required />
-        <input aria-label="Minutes" className={`${input} w-24`} defaultValue={90} max={600} min={1} name="minutes" required type="number" />
-        <select aria-label="Outcome" className={input} defaultValue="done" name="outcome">
-          <option value="done">Done</option>
-          <option value="partial">Partial</option>
-          <option value="not done">Not done</option>
-        </select>
-        <select aria-label="Focus" className={input} defaultValue="" name="focus">
-          <option value="">Focus %</option>
-          {FOCUS_STEPS.map((f) => (
-            <option key={f} value={f}>{f}%</option>
-          ))}
-        </select>
-        <button className="cursor-pointer rounded-full bg-cream px-5 py-2.5 font-medium text-ink hover:bg-white" type="submit">
-          Log session
+      {composing ? (
+        <form
+          className="composer border-l border-mint/50 py-1 pl-5"
+          onKeyDown={(e) => e.key === "Escape" && setComposing(false)}
+          onSubmit={logFromForm}
+        >
+          <input
+            aria-label="Goal"
+            autoComplete="off"
+            autoFocus
+            className="w-full border-0 bg-transparent p-0 text-2xl tracking-[-0.02em] text-cream outline-none placeholder:text-mist/50"
+            maxLength={200}
+            name="goal"
+            placeholder="What did this block produce?"
+            required
+          />
+          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 font-mono text-xs text-mist">
+            <label className="flex items-center gap-1.5">
+              <input aria-label="Minutes" className={`${quiet} w-8 text-right [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none`} defaultValue={defaults.minutes} max={600} min={1} name="minutes" required type="number" />
+              MIN
+            </label>
+            <span aria-hidden="true">·</span>
+            <select aria-label="Outcome" className={quiet} defaultValue={defaults.outcome} name="outcome">
+              <option value="done">Done</option>
+              <option value="partial">Partial</option>
+              <option value="not done">Not done</option>
+            </select>
+            <span aria-hidden="true">·</span>
+            <select aria-label="Focus" className={quiet} defaultValue={defaults.focus ?? ""} name="focus">
+              <option value="">Focus –</option>
+              {FOCUS_STEPS.map((f) => (
+                <option key={f} value={f}>Focus {f}%</option>
+              ))}
+            </select>
+            <span className="ml-auto flex items-center gap-4">
+              <button className="cursor-pointer text-mist hover:text-cream" onClick={() => setComposing(false)} type="button">
+                ESC
+              </button>
+              <button className="cursor-pointer text-mint hover:text-cream" type="submit">
+                LOG ↵
+              </button>
+            </span>
+          </div>
+        </form>
+      ) : (
+        <button
+          aria-label="Log a session"
+          className="group flex cursor-pointer items-center gap-3 bg-transparent p-0 text-mist hover:text-cream"
+          onClick={() => setComposing(true)}
+          type="button"
+        >
+          {/* A keycap: the key that opens it. */}
+          <kbd className="flex h-9 min-w-9 items-center justify-center rounded-md border border-line border-b-[3px] bg-panel px-2 font-mono text-lg leading-none text-cream shadow-[inset_0_1px_0_rgb(242_239_226/0.06)] transition group-hover:border-mint/50 group-hover:text-mint group-active:translate-y-px group-active:border-b">
+            +
+          </kbd>
+          <span className="font-mono text-xs uppercase opacity-0 transition group-hover:opacity-100">Log a session</span>
         </button>
-      </form>
+      )}
 
       <div className="mt-4 flex h-6 items-center justify-between text-[13px]">
         <span className={notice?.tone === "error" ? "text-rose" : "text-mist"} role={notice ? "status" : undefined}>
           {notice?.text}
         </span>
-        <output className={`eyebrow flex items-center gap-2 text-[11px] ${status === "error" ? "text-rose" : ""}`} data-testid="live-status">
-          {status === "live" && <span aria-hidden="true" className="inline-block size-1.5 animate-pulse rounded-full bg-mint" />}
-          {liveText}
+        {/* Only a broken connection is worth showing; data-status lets tests wait for the subscription. */}
+        <output className="eyebrow text-[11px] text-rose" data-status={status} data-testid="live-status">
+          {status === "error" ? "Live updates stopped" : ""}
         </output>
       </div>
       {status === "error" && (
@@ -180,9 +238,7 @@ export function SessionList({
         </button>
       )}
 
-      {rows.length === 0 ? (
-        <p className="my-8 text-mist">No sessions yet. Log one above, or open this page in a second tab and watch it arrive.</p>
-      ) : (
+      {rows.length > 0 && (
         <ul aria-live="polite" className="my-6 list-none border-t border-line p-0">
           {rows.map((r) => (
             <li
@@ -195,7 +251,7 @@ export function SessionList({
               </span>
               <select
                 aria-label={`Focus for ${r.goal}`}
-                className={`cursor-pointer rounded-full border border-line bg-transparent px-2 py-1 font-mono text-xs ${r.focus_pct == null ? "text-mist" : "text-cream"}`}
+                className={`${quiet} ${r.focus_pct == null ? "" : "text-cream"}`}
                 onChange={(e) => {
                   const focus_pct = e.target.value === "" ? null : Number(e.target.value);
                   mutate({ type: "focus", id: r.id, focus_pct }, () => setFocus(userId, { id: r.id, focus_pct }), `Couldn't rate "${r.goal}".`);

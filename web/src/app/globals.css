@@ -33,3 +33,14 @@ body {
   text-transform: uppercase;
   color: var(--color-mist);
 }
+
+/* The session composer drifts in when the + is clicked. */
+.composer {
+  animation: composer-in 180ms ease-out;
+}
+@keyframes composer-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}

@@ -64,3 +64,11 @@ export const competitionMembers = pgTable(
   },
   (t) => [primaryKey({ columns: [t.competition_id, t.user_id] }), index("competition_members_user_idx").on(t.user_id)],
 );
+
+// Per-user defaults for the session composer (gear menu, bottom left).
+export const userSettings = pgTable("user_settings", {
+  user_id: uuid("user_id").primaryKey(),
+  default_minutes: integer("default_minutes").notNull().default(90),
+  default_outcome: text("default_outcome").notNull().default("done"),
+  default_focus: integer("default_focus"), // null: leave focus unrated
+});
