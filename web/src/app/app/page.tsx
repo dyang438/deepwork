@@ -2,6 +2,8 @@ import Image from "next/image";
 import { Suspense } from "react";
 
 import roses from "../../../public/roses.jpg";
+import { Logo } from "@/components/logo";
+
 import { Dashboard } from "./dashboard";
 
 export default function AppPage() {
@@ -14,7 +16,7 @@ export default function AppPage() {
       </div>
       <div className="relative mx-auto w-full max-w-3xl px-5 pt-24 pb-16">
         <p className="eyebrow mb-3 flex items-center gap-2">
-          <span aria-hidden="true" className="size-2.5 rounded-[2px] bg-mint" />
+          <Logo className="size-5" />
           godeep.work
         </p>
         <h1 className="mt-0 mb-10 text-5xl font-normal tracking-[-0.04em]">Your deep work</h1>
