@@ -16,10 +16,7 @@ export default async function CliPage({ searchParams }: { searchParams: Promise<
   return (
     <main className="flex min-h-screen items-center justify-center bg-ink bg-[radial-gradient(ellipse_at_top,rgb(143_227_187/0.12),transparent_60%)] p-5">
       <div className="w-full max-w-md rounded-2xl border border-line bg-panel/80 p-8">
-        <p className="eyebrow mb-6 flex items-center gap-2.5 text-cream">
-          <Logo className="size-6" />
-          godeep.work
-        </p>
+        <Logo className="mb-4 size-16" />
         <h1 className="mt-0 mb-3 text-3xl font-normal tracking-[-0.03em]">Connect the deepwork CLI</h1>
         {!valid ? (
           <p className="text-mist">

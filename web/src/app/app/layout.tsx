@@ -35,9 +35,8 @@ export default function AppLayout({ children }: { children: ReactNode }) {
       </div>
       <div className="relative mx-auto w-full max-w-3xl px-5 pt-6 pb-16">
         <header className="mb-14 flex flex-wrap items-center gap-x-6 gap-y-3">
-          <Link className="eyebrow flex items-center gap-2 text-cream" href="/">
-            <Logo className="size-5" />
-            godeep.work
+          <Link aria-label="Home" href="/">
+            <Logo className="size-14" />
           </Link>
           <Tabs />
           <div className="ml-auto">

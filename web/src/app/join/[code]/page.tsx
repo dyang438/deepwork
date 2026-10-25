@@ -20,10 +20,7 @@ export default async function JoinPage({ params }: { params: Promise<{ code: str
   return (
     <main className="flex min-h-screen items-center justify-center bg-ink bg-[radial-gradient(ellipse_at_top,rgb(143_227_187/0.12),transparent_60%)] p-5">
       <div className="w-full max-w-md rounded-2xl border border-line bg-panel/80 p-8">
-        <p className="eyebrow mb-6 flex items-center gap-2.5 text-cream">
-          <Logo className="size-6" />
-          godeep.work
-        </p>
+        <Logo className="mb-4 size-16" />
         {!comp ? (
           <p className="text-mist">This invite link doesn&apos;t match a competition.</p>
         ) : (

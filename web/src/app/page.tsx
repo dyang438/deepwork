@@ -11,14 +11,8 @@ import { GoogleButton } from "./google-button";
 export default function Home() {
   return (
     <main className="relative min-h-screen overflow-hidden bg-ink">
-      <header className="relative z-10 flex items-center justify-between border-b border-line px-6 py-4 sm:px-8">
-        <span className="eyebrow flex items-center gap-2.5 text-[13px] text-cream">
-          <Logo className="size-7 drop-shadow-[0_0_10px_rgb(143_227_187/0.45)]" />
-          godeep.work
-        </span>
-        <Link className="rounded-full border border-cream/30 bg-ink/50 px-4 py-1.5 text-sm backdrop-blur hover:border-cream/60" href="/app">
-          Log in
-        </Link>
+      <header className="relative z-10 flex items-center justify-between border-b border-line px-6 py-2 sm:px-8">
+        <Logo className="size-16" />
       </header>
 
       {/* The painting fills the hero and falls off into black, as Neon's hero visual does. */}
