@@ -15,17 +15,15 @@ import {
 } from "react";
 
 import { leaveSession, renewOrLeave } from "@/auth/session-lost";
-import type { ActiveRow, AgentRow, SessionRow } from "@/lib/sessions"; // type-only: no server code reaches the browser
+import type { AgentRow, SessionRow } from "@/lib/sessions"; // type-only: no server code reaches the browser
 import type { Defaults } from "@/lib/settings";
 
 import { LocalTime } from "../local-time";
-import { ActiveBanner } from "./active-banner";
 import {
   deleteSession,
   logSession,
   setFocus,
   startBlock,
-  stopBlock,
   updateSession,
   type WriteResult,
 } from "./actions";
@@ -83,7 +81,6 @@ function weekStart(now = new Date()) {
 }
 
 export function SessionList({
-  active,
   agent,
   defaults,
   initialPhilosophy,
@@ -91,7 +88,6 @@ export function SessionList({
   sealedQuery,
   userId,
 }: {
-  active: { rows: ActiveRow[]; sealedQuery: SealedLiveQuery<ActiveRow> };
   agent: { rows: AgentRow[]; sealedQuery: SealedLiveQuery<AgentRow> };
   defaults: Defaults;
   initialPhilosophy: string;
@@ -125,6 +121,25 @@ export function SessionList({
   const rows = useMemo(() => [...optimistic].sort(newestFirst), [optimistic]);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [composing, setComposing] = useState(false);
+  // With Google Calendar connected, + fills the block up to 5 minutes before the next busy event.
+  const minutesInput = useRef<HTMLInputElement>(null);
+  const [nextEvent, setNextEvent] = useState<{ summary: string; start: string } | null>(null);
+  useEffect(() => {
+    if (!composing) return setNextEvent(null);
+    let live = true;
+    fetch("/api/calendar/next", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s: { connected: boolean; next?: { summary: string; start: string } | null } | null) => {
+        if (!live || !s?.connected || !s.next) return;
+        setNextEvent(s.next);
+        const room = Math.floor((new Date(s.next.start).getTime() - Date.now()) / 60_000) - 5;
+        if (room >= 5 && minutesInput.current) minutesInput.current.value = String(Math.min(room, 600));
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [composing]);
 
   // Is `deepwork agent` running on a Mac? It checks in at least every ~15 s; past 45 s it counts as offline.
   const [agentSealed] = useState(agent.sealedQuery);
@@ -165,7 +180,6 @@ export function SessionList({
     }, 20_000);
     return () => clearTimeout(t);
   }, [starting]);
-  const onActive = useCallback(() => setStarting(false), []);
 
   function startFromForm(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -445,6 +459,7 @@ export function SessionList({
                 <label className="flex items-center gap-1.5">
                   <input
                     aria-label="Minutes"
+                    ref={minutesInput}
                     className={`${quiet} w-8 text-right [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none`}
                     defaultValue={defaults.minutes}
                     max={600}
@@ -455,6 +470,16 @@ export function SessionList({
                   />
                   MIN
                 </label>
+                {nextEvent && (
+                  <span
+                    className="flex items-center gap-1.5 rounded-full border border-ochre/40 bg-ochre/10 px-2 py-0.5 normal-case text-ochre"
+                    data-testid="next-event"
+                    role="status"
+                  >
+                    <span aria-hidden="true" className="flex size-3.5 items-center justify-center rounded-full border border-ochre text-[9px] leading-none">i</span>
+                    {nextEvent.summary} begins at {new Date(nextEvent.start).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+                  </span>
+                )}
                 {macOnline ? (
                   <span className="text-mint/80">
                     {agentRow?.host
@@ -511,9 +536,12 @@ export function SessionList({
                 </span>
               </div>
             </form>
+          ) : starting ? (
+            <p className="composer eyebrow m-0 flex h-[72px] items-center gap-3 text-[11px]" data-testid="starting">
+              <span aria-hidden="true" className="inline-block size-1.5 animate-pulse rounded-full bg-mint" />
+              Starting on your Mac
+            </p>
           ) : (
-            <ActiveBanner
-              fallback={
                 <button
                   aria-label={macOnline ? "Start a block" : "Log a session"}
                   className="group flex h-10 w-full cursor-pointer items-center gap-4 bg-transparent p-0 text-cream/80 transition hover:text-mint focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-mint"
@@ -535,16 +563,6 @@ export function SessionList({
                     className="h-px flex-1 bg-line transition group-hover:bg-mint/25"
                   />
                 </button>
-              }
-              initial={active.rows}
-              onActive={onActive}
-              onStop={() =>
-                startTransition(async () => void (await stopBlock(userId)))
-              }
-              sealedQuery={active.sealedQuery}
-              starting={starting}
-              userId={userId}
-            />
           )}
 
           <div className="mt-4 flex h-6 items-center justify-between text-[13px]">

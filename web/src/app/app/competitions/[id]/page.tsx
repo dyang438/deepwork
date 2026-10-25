@@ -4,9 +4,7 @@ import { headers } from "next/headers";
 
 import { getUser } from "@/auth/server";
 import { getMembership, loadLeaderboard } from "@/lib/competitions";
-import { getEnv } from "@/lib/env";
 
-import { RealtimeRoot } from "../../../realtime-root";
 import { InviteLink, LeaveButton } from "./controls";
 import { Leaderboard } from "./leaderboard";
 
@@ -28,9 +26,7 @@ export default async function CompetitionPage({ params }: { params: Promise<{ id
         {day(comp.starts_at)} {comp.ends_at ? `– ${day(comp.ends_at)}` : "onward"}
       </p>
       <h1 className="mt-0 mb-8 text-5xl font-normal tracking-[-0.04em]">{comp.name}</h1>
-      <RealtimeRoot key={sealedQuery.queryFingerprint} url={getEnv().realtimeUrl}>
-        <Leaderboard competitionId={id} initialRows={rows} meId={user.id} sealedQuery={sealedQuery} />
-      </RealtimeRoot>
+      <Leaderboard key={sealedQuery.queryFingerprint} competitionId={id} initialRows={rows} meId={user.id} sealedQuery={sealedQuery} />
       <div className="mt-10 flex flex-wrap items-center justify-between gap-4 border-t border-line pt-6">
         <InviteLink url={`${origin}/join/${comp.invite_code}`} />
         <LeaveButton competitionId={id} />

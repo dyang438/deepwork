@@ -5,6 +5,7 @@ import { useEffect, useState, useTransition } from "react";
 
 import type { Defaults } from "@/lib/settings";
 
+import { CalendarConnect } from "../calendar-connect";
 import { saveDefaults } from "./actions";
 
 const FOCUS_STEPS = [100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0];
@@ -85,6 +86,7 @@ export function SettingsGear({ defaults }: { defaults: Defaults }) {
                 ))}
               </select>
             </label>
+            <CalendarConnect />
             {error && <p className="mb-4 text-sm text-rose" role="alert">{error}</p>}
             <div className="flex items-center justify-end gap-4">
               <button className="cursor-pointer text-sm text-mist hover:text-cream" onClick={() => setOpen(false)} type="button">

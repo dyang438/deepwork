@@ -60,12 +60,14 @@ export default function PrivacyPage() {
       <ul>
         <li>We read your calendar list and upcoming events (titles, times and whether you are busy). We never create, change or delete calendar events.</li>
         <li>
-          The access and refresh tokens Google issues are stored with your account in our database so the site can check
+          The access and refresh tokens Google issues are stored with your account in our database (by our sign-in provider,
+          and by the site itself for the Calendar connection) so the site can check
           your calendar while you use it. We do not keep a copy of your events beyond what is needed to show the suggestion.
         </li>
         <li>Calendar data is not shown to other users, not used for advertising, and not sold or shared, except with the service providers below as needed to run the site.</li>
         <li>
-          You can revoke access at any time at{" "}
+          You can disconnect it any time from the settings menu (the gear), which revokes the grant at Google and deletes
+          our copy of the tokens, or at{" "}
           <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>; the site then stops
           reading your calendar and works without it.
         </li>

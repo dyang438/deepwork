@@ -73,6 +73,7 @@ export const userSettings = pgTable("user_settings", {
   default_outcome: text("default_outcome").notNull().default("done"),
   default_focus: integer("default_focus"), // null: leave focus unrated
   philosophy: text("philosophy").notNull().default(""),
+  notepad: text("notepad").notNull().default(""),
 });
 
 // Commands from the dashboard to the user's Mac. `deepwork agent` polls, claims and runs them.
@@ -97,4 +98,19 @@ export const cliAgents = pgTable("cli_agents", {
 export const calFeeds = pgTable("cal_feeds", {
   user_id: uuid("user_id").primaryKey(),
   token: text("token").notNull().unique(),
+});
+
+// Short-lived Google access tokens we refreshed ourselves (the long-lived grant stays in neon_auth.account).
+export const googleTokenCache = pgTable("google_token_cache", {
+  user_id: uuid("user_id").primaryKey(),
+  access_token: text("access_token").notNull(),
+  expires_at: timestamp("expires_at", { withTimezone: true }).notNull(),
+});
+
+// The long-lived Calendar grant from the app's own read-only Google connection (/api/calendar/connect).
+export const googleCalendarGrants = pgTable("google_calendar_grants", {
+  user_id: uuid("user_id").primaryKey(),
+  refresh_token: text("refresh_token").notNull(),
+  scope: text("scope").notNull(),
+  created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

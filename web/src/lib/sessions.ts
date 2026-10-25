@@ -1,6 +1,7 @@
 import "server-only";
 
 import { desc, eq } from "drizzle-orm";
+import { cache } from "react";
 
 import { getDb } from "./db";
 import { getRealtime } from "./realtime";
@@ -27,11 +28,11 @@ function sessionsQuery(userId: string) {
 
 export type SessionRow = Awaited<ReturnType<typeof sessionsQuery>>[number];
 
-export async function loadSessions(userId: string) {
+export const loadSessions = cache(async (userId: string) => {
   const query = sessionsQuery(userId);
   const [rows, sealedQuery] = await Promise.all([query, getRealtime().seal({ query })]);
   return { rows, sealedQuery };
-}
+});
 
 export const sealSessions = (userId: string) => getRealtime().seal({ query: sessionsQuery(userId) });
 
