@@ -186,13 +186,15 @@ export function SessionList({
   const [sel, setSel] = useState(-1);
   const [editing, setEditing] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<OptimisticRow | null>(null); // the delete dialog
+  const [history, setHistory] = useState(false); // j swaps the overview for the session history
   const keys = useRef({
     rows: [] as readonly OptimisticRow[],
     sel,
     composing,
     editing,
+    history,
   });
-  keys.current = { rows, sel, composing, editing };
+  keys.current = { rows, sel, composing, editing, history };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
@@ -205,10 +207,23 @@ export function SessionList({
         document.querySelector('[role="dialog"]')
       )
         return;
-      if (e.key === "+" || e.key === "=") setComposing(true);
-      else if (e.key === "j") setSel(Math.min(k.sel + 1, k.rows.length - 1));
-      else if (e.key === "k") setSel(Math.max(k.sel - 1, 0));
-      else if (e.key === "Enter" && k.rows[k.sel]) setEditing(k.rows[k.sel].id);
+      if (e.key === "+" || e.key === "=") {
+        setHistory(false); // the composer lives on the overview
+        setComposing(true);
+      }
+      else if (e.key === "j" && !k.history) {
+        setHistory(true);
+        setSel(k.rows.length ? 0 : -1);
+      } else if (e.key === "j") setSel(Math.min(k.sel + 1, k.rows.length - 1));
+      else if (e.key === "k" && k.history && k.sel <= 0) {
+        setHistory(false); // k past the top goes back to the overview
+        setSel(-1);
+      } else if (e.key === "k") setSel(Math.max(k.sel - 1, 0));
+      else if (e.key === "Escape" && k.history) {
+        setHistory(false);
+        setSel(-1);
+      } else if (e.key === "Enter" && k.rows[k.sel])
+        setEditing(k.rows[k.sel].id);
       else if (e.key === "d" && k.rows[k.sel]) setConfirming(k.rows[k.sel]);
       else return;
       e.preventDefault();
@@ -325,261 +340,291 @@ export function SessionList({
 
   return (
     <section>
-      <dl className="mb-10 grid grid-cols-3 overflow-hidden rounded-2xl border border-line">
-        {[
-          ["Deep hours this week", week.hours.toFixed(1)],
-          ["Sessions this week", String(week.count)],
-          ["Goals hit", week.count ? `${week.done} of ${week.count}` : "–"],
-        ].map(([label, value], i) => (
-          <div
-            key={label}
-            className={`bg-panel/80 p-5 ${i ? "border-l border-line" : ""}`}
-          >
-            <dt className="eyebrow text-[11px]">{label}</dt>
-            <dd
-              className="m-0 mt-2 text-4xl tracking-[-0.04em] tabular-nums"
-              data-testid={label}
-            >
-              {value}
-            </dd>
-          </div>
-        ))}
-      </dl>
+      {!history ? (
+        <div className="view-down" key="overview">
+          <h1 className="mt-0 mb-10 text-5xl font-normal tracking-[-0.04em]">
+            Your deep work
+          </h1>
+          <dl className="mb-10 grid grid-cols-3 overflow-hidden rounded-2xl border border-line">
+            {[
+              ["Deep hours this week", week.hours.toFixed(1)],
+              ["Sessions this week", String(week.count)],
+              ["Goals hit", week.count ? `${week.done} of ${week.count}` : "–"],
+            ].map(([label, value], i) => (
+              <div
+                key={label}
+                className={`bg-panel/80 p-5 ${i ? "border-l border-line" : ""}`}
+              >
+                <dt className="eyebrow text-[11px]">{label}</dt>
+                <dd
+                  className="m-0 mt-2 text-4xl tracking-[-0.04em] tabular-nums"
+                  data-testid={label}
+                >
+                  {value}
+                </dd>
+              </div>
+            ))}
+          </dl>
 
-      {composing ? (
-        <form
-          className="composer border-l border-mint/50 py-1 pl-5"
-          onKeyDown={(e) => e.key === "Escape" && setComposing(false)}
-          onSubmit={macOnline ? startFromForm : logFromForm}
-        >
-          <input
-            aria-label="Goal"
-            autoComplete="off"
-            autoFocus
-            className="w-full border-0 bg-transparent p-0 text-2xl tracking-[-0.02em] text-cream outline-none placeholder:text-mist/50"
-            maxLength={200}
-            name="goal"
-            placeholder={
-              macOnline
-                ? "What will this block produce?"
-                : "What did this block produce?"
-            }
-            required
-          />
-          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 font-mono text-xs text-mist">
-            <label className="flex items-center gap-1.5">
+          {composing ? (
+            <form
+              className="composer border-l border-mint/50 py-1 pl-5"
+              onKeyDown={(e) => e.key === "Escape" && setComposing(false)}
+              onSubmit={macOnline ? startFromForm : logFromForm}
+            >
               <input
-                aria-label="Minutes"
-                className={`${quiet} w-8 text-right [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none`}
-                defaultValue={defaults.minutes}
-                max={600}
-                min={1}
-                name="minutes"
+                aria-label="Goal"
+                autoComplete="off"
+                autoFocus
+                className="w-full border-0 bg-transparent p-0 text-2xl tracking-[-0.02em] text-cream outline-none placeholder:text-mist/50"
+                maxLength={200}
+                name="goal"
+                placeholder={
+                  macOnline
+                    ? "What will this block produce?"
+                    : "What did this block produce?"
+                }
                 required
-                type="number"
               />
-              MIN
-            </label>
-            {macOnline ? (
-              <span className="text-mint/80">
-                {agentRow?.host
-                  ? `ON ${agentRow.host.replace(/\.local$/, "").toUpperCase()}`
-                  : "ON YOUR MAC"}
-              </span>
-            ) : (
-              <>
-                <span aria-hidden="true">·</span>
-                <select
-                  aria-label="Outcome"
-                  className={quiet}
-                  defaultValue={defaults.outcome}
-                  name="outcome"
-                >
-                  <option value="done">Done</option>
-                  <option value="partial">Partial</option>
-                  <option value="not done">Not done</option>
-                </select>
-                <span aria-hidden="true">·</span>
-                <select
-                  aria-label="Focus"
-                  className={quiet}
-                  defaultValue={defaults.focus ?? ""}
-                  name="focus"
-                >
-                  <option value="">Focus –</option>
-                  {FOCUS_STEPS.map((f) => (
-                    <option key={f} value={f}>
-                      Focus {f}%
-                    </option>
-                  ))}
-                </select>
-                <span className="normal-case text-mist/70">
-                  Mac offline: logs it as done. Run deepwork agent install to
-                  start blocks from here.
+              <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 font-mono text-xs text-mist">
+                <label className="flex items-center gap-1.5">
+                  <input
+                    aria-label="Minutes"
+                    className={`${quiet} w-8 text-right [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none`}
+                    defaultValue={defaults.minutes}
+                    max={600}
+                    min={1}
+                    name="minutes"
+                    required
+                    type="number"
+                  />
+                  MIN
+                </label>
+                {macOnline ? (
+                  <span className="text-mint/80">
+                    {agentRow?.host
+                      ? `ON ${agentRow.host.replace(/\.local$/, "").toUpperCase()}`
+                      : "ON YOUR MAC"}
+                  </span>
+                ) : (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <select
+                      aria-label="Outcome"
+                      className={quiet}
+                      defaultValue={defaults.outcome}
+                      name="outcome"
+                    >
+                      <option value="done">Done</option>
+                      <option value="partial">Partial</option>
+                      <option value="not done">Not done</option>
+                    </select>
+                    <span aria-hidden="true">·</span>
+                    <select
+                      aria-label="Focus"
+                      className={quiet}
+                      defaultValue={defaults.focus ?? ""}
+                      name="focus"
+                    >
+                      <option value="">Focus –</option>
+                      {FOCUS_STEPS.map((f) => (
+                        <option key={f} value={f}>
+                          Focus {f}%
+                        </option>
+                      ))}
+                    </select>
+                    <span className="normal-case text-mist/70">
+                      Mac offline: logs it as done. Run deepwork agent install
+                      to start blocks from here.
+                    </span>
+                  </>
+                )}
+                <span className="ml-auto flex items-center gap-4">
+                  <button
+                    className="cursor-pointer text-mist hover:text-cream"
+                    onClick={() => setComposing(false)}
+                    type="button"
+                  >
+                    ESC
+                  </button>
+                  <button
+                    className="cursor-pointer text-mint hover:text-cream"
+                    type="submit"
+                  >
+                    {macOnline ? "START ↵" : "LOG ↵"}
+                  </button>
                 </span>
-              </>
-            )}
-            <span className="ml-auto flex items-center gap-4">
-              <button
-                className="cursor-pointer text-mist hover:text-cream"
-                onClick={() => setComposing(false)}
-                type="button"
-              >
-                ESC
-              </button>
-              <button
-                className="cursor-pointer text-mint hover:text-cream"
-                type="submit"
-              >
-                {macOnline ? "START ↵" : "LOG ↵"}
-              </button>
+              </div>
+            </form>
+          ) : (
+            <ActiveBanner
+              fallback={
+                <button
+                  aria-label="Log a session"
+                  className="group flex cursor-pointer items-center gap-3 bg-transparent p-0 text-mist hover:text-cream"
+                  onClick={() => setComposing(true)}
+                  type="button"
+                >
+                  {/* A keycap: the key that opens it. */}
+                  <kbd className="flex h-9 min-w-9 items-center justify-center rounded-md border border-line border-b-[3px] bg-panel px-2 font-mono text-lg leading-none text-cream shadow-[inset_0_1px_0_rgb(242_239_226/0.06)] transition group-hover:border-mint/50 group-hover:text-mint group-active:translate-y-px group-active:border-b">
+                    +
+                  </kbd>
+                  <span className="font-mono text-xs uppercase opacity-0 transition group-hover:opacity-100">
+                    {macOnline ? "Start a block" : "Log a session"}
+                  </span>
+                </button>
+              }
+              initial={active.rows}
+              onActive={onActive}
+              onStop={() =>
+                startTransition(async () => void (await stopBlock(userId)))
+              }
+              sealedQuery={active.sealedQuery}
+              starting={starting}
+              userId={userId}
+            />
+          )}
+
+          <div className="mt-4 flex h-6 items-center justify-between text-[13px]">
+            <span
+              className={notice?.tone === "error" ? "text-rose" : "text-mist"}
+              role={notice ? "status" : undefined}
+            >
+              {notice?.text}
             </span>
+            {/* Only a broken connection is worth showing; data-status lets tests wait for the subscription. */}
+            <output
+              className="eyebrow text-[11px] text-rose"
+              data-status={status}
+              data-testid="live-status"
+            >
+              {status === "error" ? "Live updates stopped" : ""}
+            </output>
           </div>
-        </form>
-      ) : (
-        <ActiveBanner
-          fallback={
+          {status === "error" && (
             <button
-              aria-label="Log a session"
-              className="group flex cursor-pointer items-center gap-3 bg-transparent p-0 text-mist hover:text-cream"
-              onClick={() => setComposing(true)}
+              className="mt-2 cursor-pointer text-sm font-medium text-rose"
+              onClick={() => window.location.reload()}
               type="button"
             >
-              {/* A keycap: the key that opens it. */}
-              <kbd className="flex h-9 min-w-9 items-center justify-center rounded-md border border-line border-b-[3px] bg-panel px-2 font-mono text-lg leading-none text-cream shadow-[inset_0_1px_0_rgb(242_239_226/0.06)] transition group-hover:border-mint/50 group-hover:text-mint group-active:translate-y-px group-active:border-b">
-                +
-              </kbd>
-              <span className="font-mono text-xs uppercase opacity-0 transition group-hover:opacity-100">
-                {macOnline ? "Start a block" : "Log a session"}
-              </span>
+              Reconnect
             </button>
-          }
-          initial={active.rows}
-          onActive={onActive}
-          onStop={() =>
-            startTransition(async () => void (await stopBlock(userId)))
-          }
-          sealedQuery={active.sealedQuery}
-          starting={starting}
-          userId={userId}
-        />
-      )}
+          )}
 
-      <div className="mt-4 flex h-6 items-center justify-between text-[13px]">
-        <span
-          className={notice?.tone === "error" ? "text-rose" : "text-mist"}
-          role={notice ? "status" : undefined}
-        >
-          {notice?.text}
-        </span>
-        {/* Only a broken connection is worth showing; data-status lets tests wait for the subscription. */}
-        <output
-          className="eyebrow text-[11px] text-rose"
-          data-status={status}
-          data-testid="live-status"
-        >
-          {status === "error" ? "Live updates stopped" : ""}
-        </output>
-      </div>
-      {status === "error" && (
-        <button
-          className="mt-2 cursor-pointer text-sm font-medium text-rose"
-          onClick={() => window.location.reload()}
-          type="button"
-        >
-          Reconnect
-        </button>
-      )}
-
-      {rows.length > 0 && (
-        <ul
-          aria-live="polite"
-          className="my-6 list-none border-t border-line p-0"
-        >
-          {rows.map((r, i) => (
-            <li
-              aria-selected={i === sel}
-              className={`relative -mx-3 grid cursor-pointer grid-cols-[1fr_auto_auto_auto_auto] items-center gap-5 rounded-lg border-b border-line px-3 py-4 hover:bg-cream/[0.03] ${i === sel ? "bg-cream/[0.05]" : ""} ${r.pending ? "opacity-50" : ""}`}
-              data-row={i}
-              key={r.id}
-              onClick={() => {
-                setSel(i);
-                setEditing(r.id);
-              }}
+          <button
+            className="mt-16 cursor-pointer bg-transparent p-0 font-mono text-[11px] uppercase text-mist/70 hover:text-cream"
+            onClick={() => {
+              setHistory(true);
+              setSel(rows.length ? 0 : -1);
+            }}
+            type="button"
+          >
+            <kbd className="mr-2 rounded border border-line border-b-2 px-1.5 text-cream">
+              j
+            </kbd>
+            History
+          </button>
+        </div>
+      ) : (
+        <div className="view-up" key="history">
+          <h1 className="mt-0 mb-8 flex items-baseline justify-between text-5xl font-normal tracking-[-0.04em]">
+            History
+            <span className="font-mono text-[11px] tracking-normal text-mist">
+              J / K · ENTER EDIT · D DELETE · ESC BACK
+            </span>
+          </h1>
+          {rows.length === 0 && <p className="text-mist">No sessions yet.</p>}
+          {rows.length > 0 && (
+            <ul
+              aria-live="polite"
+              className="my-6 list-none border-t border-line p-0"
             >
-              {i === sel && (
-                <span
-                  aria-hidden="true"
-                  className="absolute inset-y-3 left-0 w-0.5 rounded bg-mint"
-                />
-              )}
-              <span className="min-w-0 break-words">
-                {r.goal}
-                {r.notes && (
-                  <span
-                    className="ml-2 font-mono text-[11px] text-mist"
-                    title="Has notes"
-                  >
-                    ¶
-                  </span>
-                )}
-              </span>
-              <span className="font-mono text-xs text-mist tabular-nums">
-                {r.minutes} MIN ·{" "}
-                <span
-                  className={
-                    r.outcome === "done"
-                      ? "text-mint"
-                      : r.outcome === "partial"
-                        ? "text-ochre"
-                        : r.outcome === "not done"
-                          ? "text-rose"
-                          : "text-mist"
-                  }
+              {rows.map((r, i) => (
+                <li
+                  aria-selected={i === sel}
+                  className={`relative -mx-3 grid cursor-pointer grid-cols-[1fr_auto_auto_auto_auto] items-center gap-5 rounded-lg border-b border-line px-3 py-4 hover:bg-cream/[0.03] ${i === sel ? "bg-cream/[0.05]" : ""} ${r.pending ? "opacity-50" : ""}`}
+                  data-row={i}
+                  key={r.id}
+                  onClick={() => {
+                    setSel(i);
+                    setEditing(r.id);
+                  }}
                 >
-                  {r.outcome.toUpperCase()}
-                </span>
-              </span>
-              <select
-                aria-label={`Focus for ${r.goal}`}
-                className={`${quiet} ${r.focus_pct == null ? "" : "text-cream"}`}
-                onClick={(e) => e.stopPropagation()}
-                onChange={(e) => {
-                  const focus_pct =
-                    e.target.value === "" ? null : Number(e.target.value);
-                  mutate(
-                    { type: "focus", id: r.id, focus_pct },
-                    () => setFocus(userId, { id: r.id, focus_pct }),
-                    `Couldn't rate "${r.goal}".`,
-                  );
-                }}
-                value={r.focus_pct ?? ""}
-              >
-                <option value="">FOCUS –</option>
-                {FOCUS_STEPS.map((f) => (
-                  <option key={f} value={f}>
-                    FOCUS {f}%
-                  </option>
-                ))}
-              </select>
-              <span className="text-xs text-mist">
-                <LocalTime date={r.started_at} />
-              </span>
-              <button
-                aria-label={`Delete ${r.goal}`}
-                className="cursor-pointer rounded-md border border-transparent bg-transparent px-2 py-1 text-xs text-mist transition hover:border-rose/70 hover:text-rose"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setSel(i);
-                  setConfirming(r);
-                }}
-                type="button"
-              >
-                Delete
-              </button>
-            </li>
-          ))}
-        </ul>
+                  {i === sel && (
+                    <span
+                      aria-hidden="true"
+                      className="absolute inset-y-3 left-0 w-0.5 rounded bg-mint"
+                    />
+                  )}
+                  <span className="min-w-0 break-words">
+                    {r.goal}
+                    {r.notes && (
+                      <span
+                        className="ml-2 font-mono text-[11px] text-mist"
+                        title="Has notes"
+                      >
+                        ¶
+                      </span>
+                    )}
+                  </span>
+                  <span className="font-mono text-xs text-mist tabular-nums">
+                    {r.minutes} MIN ·{" "}
+                    <span
+                      className={
+                        r.outcome === "done"
+                          ? "text-mint"
+                          : r.outcome === "partial"
+                            ? "text-ochre"
+                            : r.outcome === "not done"
+                              ? "text-rose"
+                              : "text-mist"
+                      }
+                    >
+                      {r.outcome.toUpperCase()}
+                    </span>
+                  </span>
+                  <select
+                    aria-label={`Focus for ${r.goal}`}
+                    className={`${quiet} ${r.focus_pct == null ? "" : "text-cream"}`}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => {
+                      const focus_pct =
+                        e.target.value === "" ? null : Number(e.target.value);
+                      mutate(
+                        { type: "focus", id: r.id, focus_pct },
+                        () => setFocus(userId, { id: r.id, focus_pct }),
+                        `Couldn't rate "${r.goal}".`,
+                      );
+                    }}
+                    value={r.focus_pct ?? ""}
+                  >
+                    <option value="">FOCUS –</option>
+                    {FOCUS_STEPS.map((f) => (
+                      <option key={f} value={f}>
+                        FOCUS {f}%
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-xs text-mist">
+                    <LocalTime date={r.started_at} />
+                  </span>
+                  <button
+                    aria-label={`Delete ${r.goal}`}
+                    className="cursor-pointer rounded-md border border-transparent bg-transparent px-2 py-1 text-xs text-mist transition hover:border-rose/70 hover:text-rose"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSel(i);
+                      setConfirming(r);
+                    }}
+                    type="button"
+                  >
+                    Delete
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
       {confirming && (
         <ConfirmDelete

@@ -14,9 +14,9 @@ export function CreateForm() {
     <form action={action} className="flex flex-col gap-3 rounded-2xl border border-line bg-panel/80 p-5">
       <p className="eyebrow m-0 text-[11px]">Start a competition</p>
       <input aria-label="Competition name" className={input} maxLength={80} name="name" placeholder="November deep work" required />
-      <label className="flex items-center gap-3 text-sm text-mist">
+      <label className="flex flex-col gap-1.5 text-sm text-mist">
         Ends (optional)
-        <input aria-label="End date" className={`${input} w-auto flex-1`} name="ends_at" type="date" />
+        <input aria-label="End date" className={`${input} [color-scheme:dark]`} name="ends_at" type="date" />
       </label>
       <button className={button} disabled={pending} type="submit">
         {pending ? "Creating…" : "Create"}
