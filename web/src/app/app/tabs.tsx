@@ -19,11 +19,11 @@ export function Tabs() {
       if (e.key !== "n" || e.metaKey || e.ctrlKey || e.altKey) return;
       if (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || document.querySelector('[role="dialog"], [role="alertdialog"]')) return;
       e.preventDefault();
-      router.push(TABS[0].active(path) ? TABS[1].href : TABS[0].href);
+      router.push(TABS[0].active(window.location.pathname) ? TABS[1].href : TABS[0].href); // the live URL, never a stale render's
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [path, router]);
+  }, [router]);
   return (
     <div className="flex rounded-full border border-line bg-ink/70 p-1 shadow-[0_8px_30px_rgb(0_0_0/0.35)] backdrop-blur">
       {TABS.map((t) => (

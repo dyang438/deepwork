@@ -182,7 +182,7 @@ export function SessionList({
     });
   }
 
-  // Keyboard, outside text fields: + (or =) opens the composer; j / k move through sessions, Enter opens one.
+  // Keyboard, outside text fields: + opens the composer, h / l switch today/week, and j / k move through sessions.
   const [sel, setSel] = useState(-1);
   const [editing, setEditing] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<OptimisticRow | null>(null); // the delete dialog
@@ -225,6 +225,8 @@ export function SessionList({
       } else if (e.key === "Enter" && k.rows[k.sel])
         setEditing(k.rows[k.sel].id);
       else if (e.key === "d" && k.rows[k.sel]) setConfirming(k.rows[k.sel]);
+      else if ((e.key === "h" || e.key === "t") && !k.history) setRange("today");
+      else if ((e.key === "l" || e.key === "w") && !k.history) setRange("week");
       else return;
       e.preventDefault();
     };
@@ -258,15 +260,16 @@ export function SessionList({
     );
   }
 
+  const [range, setRange] = useState<"today" | "week">("today");
   const week = useMemo(() => {
-    const since = weekStart();
+    const since = range === "week" ? weekStart() : new Date(new Date().setHours(0, 0, 0, 0));
     const mine = rows.filter((r) => r.started_at >= since);
     return {
       hours: mine.reduce((m, r) => m + r.minutes, 0) / 60,
       count: mine.length,
       done: mine.filter((r) => r.outcome === "done").length,
     };
-  }, [rows]);
+  }, [rows, range]);
 
   function mutate(
     action: OptimisticAction,
@@ -345,10 +348,23 @@ export function SessionList({
           <h1 className="mt-0 mb-10 text-5xl font-normal tracking-[-0.04em]">
             Your deep work
           </h1>
+          <div className="mb-3 flex justify-end gap-4 font-mono text-[11px] uppercase">
+            {(["today", "week"] as const).map((r) => (
+              <button
+                aria-pressed={range === r}
+                className={`cursor-pointer bg-transparent p-0 ${range === r ? "text-cream" : "text-mist/60 hover:text-cream"}`}
+                key={r}
+                onClick={() => setRange(r)}
+                type="button"
+              >
+                {r === "today" ? "Today" : "Week"}
+              </button>
+            ))}
+          </div>
           <dl className="mb-10 grid grid-cols-3 overflow-hidden rounded-2xl border border-line">
             {[
-              ["Deep hours this week", week.hours.toFixed(1)],
-              ["Sessions this week", String(week.count)],
+              [range === "today" ? "Deep hours today" : "Deep hours this week", week.hours.toFixed(1)],
+              [range === "today" ? "Sessions today" : "Sessions this week", String(week.count)],
               ["Goals hit", week.count ? `${week.done} of ${week.count}` : "–"],
             ].map(([label, value], i) => (
               <div
@@ -460,17 +476,31 @@ export function SessionList({
             <ActiveBanner
               fallback={
                 <button
-                  aria-label="Log a session"
-                  className="group flex cursor-pointer items-center gap-3 bg-transparent p-0 text-mist hover:text-cream"
+                  aria-label={macOnline ? "Start a block" : "Log a session"}
+                  className="group flex w-full cursor-pointer items-center justify-between gap-4 rounded-xl border border-line bg-panel/55 p-4 text-left transition hover:border-mint/40 hover:bg-panel/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-mint"
                   onClick={() => setComposing(true)}
                   type="button"
                 >
-                  {/* A keycap: the key that opens it. */}
-                  <kbd className="flex h-9 min-w-9 items-center justify-center rounded-md border border-line border-b-[3px] bg-panel px-2 font-mono text-lg leading-none text-cream shadow-[inset_0_1px_0_rgb(242_239_226/0.06)] transition group-hover:border-mint/50 group-hover:text-mint group-active:translate-y-px group-active:border-b">
-                    +
-                  </kbd>
-                  <span className="font-mono text-xs uppercase opacity-0 transition group-hover:opacity-100">
-                    {macOnline ? "Start a block" : "Log a session"}
+                  <span className="flex min-w-0 items-center gap-4">
+                    <span aria-hidden="true" className="flex size-11 shrink-0 items-center justify-center rounded-lg border border-mint/20 bg-mint/[0.07] font-mono text-2xl text-mint transition group-hover:bg-mint/[0.12] group-hover:text-cream">
+                      +
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block text-sm text-cream">
+                        {macOnline ? "Start a block" : "Log a session"}
+                      </span>
+                      <span className="mt-1 block text-xs text-mist">
+                        {macOnline
+                          ? "Choose a goal and make space for it."
+                          : "Capture what you worked on."}
+                      </span>
+                    </span>
+                  </span>
+                  <span className="flex shrink-0 items-center gap-2 font-mono text-[10px] uppercase tracking-wide text-mist/70">
+                    <span className="hidden sm:inline">Press</span>
+                    <kbd className="flex h-7 min-w-7 items-center justify-center rounded-md border border-line border-b-2 bg-ink px-2 text-xs text-cream transition group-hover:border-mint/40">
+                      +
+                    </kbd>
                   </span>
                 </button>
               }

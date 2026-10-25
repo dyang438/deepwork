@@ -15,7 +15,7 @@ export default async function CompetitionsPage() {
   const day = (d: Date) =>
     d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
   return (
-    <>
+    <div className="view-down">
       <h1 className="mt-0 mb-10 text-5xl font-normal tracking-[-0.04em]">
         My competitions
       </h1>
@@ -44,6 +44,6 @@ export default async function CompetitionsPage() {
           )}
         </div>
       </div>
-    </>
+    </div>
   );
 }

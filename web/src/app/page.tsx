@@ -20,7 +20,7 @@ export default function Home() {
             CLI
           </a>
           <Link className="rounded-full border border-cream/30 bg-ink/40 px-4 py-1.5 backdrop-blur hover:border-cream/60" href="/app">
-            Dashboard <span className="ml-1 font-mono text-[11px] text-mist">D</span>
+            Dashboard
           </Link>
         </nav>
       </header>
