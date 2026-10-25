@@ -72,6 +72,7 @@ export const userSettings = pgTable("user_settings", {
   default_minutes: integer("default_minutes").notNull().default(90),
   default_outcome: text("default_outcome").notNull().default("done"),
   default_focus: integer("default_focus"), // null: leave focus unrated
+  philosophy: text("philosophy").notNull().default(""),
 });
 
 // Commands from the dashboard to the user's Mac. `deepwork agent` polls, claims and runs them.

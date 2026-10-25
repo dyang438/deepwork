@@ -3,6 +3,7 @@ import { connection } from "next/server";
 
 import { getUser } from "@/auth/server";
 import { getEnv } from "@/lib/env";
+import { getPhilosophy } from "@/lib/philosophy";
 import { loadActive, loadAgent, loadSessions } from "@/lib/sessions";
 import { getDefaults } from "@/lib/settings";
 
@@ -14,16 +15,17 @@ export async function Dashboard() {
   await connection();
   const user = await getUser();
   if (!user) redirect("/auth/sign-in"); // backstop: proxy.ts already redirected signed-out page loads
-  const [{ rows, sealedQuery }, active, agent, defaults] = await Promise.all([
+  const [{ rows, sealedQuery }, active, agent, defaults, philosophy] = await Promise.all([
     loadSessions(user.id),
     loadActive(user.id),
     loadAgent(user.id),
     getDefaults(user.id),
+    getPhilosophy(user.id),
   ]);
   return (
     <>
       <RealtimeRoot key={sealedQuery.queryFingerprint} url={getEnv().realtimeUrl}>
-        <SessionList active={active} agent={agent} defaults={defaults} initialSessions={rows} sealedQuery={sealedQuery} userId={user.id} />
+        <SessionList active={active} agent={agent} defaults={defaults} initialPhilosophy={philosophy} initialSessions={rows} sealedQuery={sealedQuery} userId={user.id} />
       </RealtimeRoot>
     </>
   );

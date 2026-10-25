@@ -31,6 +31,7 @@ import {
 } from "./actions";
 import { TodayStrip } from "./today-strip";
 import { ConfirmDelete } from "./confirm-delete";
+import { Philosophy } from "./philosophy";
 import { SessionDrawer, type SessionEdit } from "./session-drawer";
 
 type OptimisticRow = SessionRow & { pending?: true };
@@ -85,6 +86,7 @@ export function SessionList({
   active,
   agent,
   defaults,
+  initialPhilosophy,
   initialSessions,
   sealedQuery,
   userId,
@@ -92,6 +94,7 @@ export function SessionList({
   active: { rows: ActiveRow[]; sealedQuery: SealedLiveQuery<ActiveRow> };
   agent: { rows: AgentRow[]; sealedQuery: SealedLiveQuery<AgentRow> };
   defaults: Defaults;
+  initialPhilosophy: string;
   initialSessions: SessionRow[];
   sealedQuery: SealedLiveQuery<SessionRow>;
   userId: string;
@@ -187,6 +190,7 @@ export function SessionList({
   const [sel, setSel] = useState(-1);
   const [editing, setEditing] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<OptimisticRow | null>(null); // the delete dialog
+  const [philosophyOpen, setPhilosophyOpen] = useState(false);
   // Which view the Personal tab shows: the overview, the session history (h / Down), or the calendar (c).
   const [view, setView] = useState<"overview" | "history">("overview");
   const [showToday, setShowToday] = useState(false); // the today timeline: hidden until c (or Calendar)
@@ -216,7 +220,8 @@ export function SessionList({
       if (e.key === "+" || e.key === "=") {
         setHistory(false); // the composer lives on the overview
         setComposing(true);
-      } else if (e.key === "c") setShowToday((v) => !v);
+      } else if (e.key === "p") setPhilosophyOpen(true);
+      else if (e.key === "c") setShowToday((v) => !v);
       else if (e.key === "h" && !k.history) {
         setView("history");
         setSel(k.rows.length ? 0 : -1);
@@ -363,7 +368,8 @@ export function SessionList({
   return (
     <section className="relative">
       {showToday && (
-        <div className="hidden min-[1360px]:absolute min-[1360px]:top-0 min-[1360px]:left-full min-[1360px]:ml-10 min-[1360px]:block min-[1360px]:w-56">
+        // Fixed in the right margin: 80% of the window tall, equal gaps above and below.
+        <div className="fixed top-[10vh] bottom-[10vh] left-[calc(50%+384px+2.5rem)] z-10 hidden w-56 min-[1360px]:block">
           <TodayStrip onOpen={(id) => setEditing(id)} rows={rows} />
         </div>
       )}
@@ -585,6 +591,13 @@ export function SessionList({
             >
               Calendar
             </button>
+            <button
+              className="ml-auto cursor-pointer bg-transparent p-0 text-mist/70 hover:text-cream"
+              onClick={() => setPhilosophyOpen(true)}
+              type="button"
+            >
+              Philosophy
+            </button>
           </div>
         </div>
       ) : (
@@ -685,6 +698,13 @@ export function SessionList({
           )}
         </div>
       )}
+      <Philosophy
+        initial={initialPhilosophy}
+        key={userId}
+        onClose={() => setPhilosophyOpen(false)}
+        open={philosophyOpen}
+        userId={userId}
+      />
       {confirming && (
         <ConfirmDelete
           goal={confirming.goal}
