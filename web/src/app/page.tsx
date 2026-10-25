@@ -6,11 +6,13 @@ import { Logo } from "@/components/logo";
 
 import { Distracted } from "./distracted";
 import { GoogleButton } from "./google-button";
+import { LandingKeys } from "./landing-keys";
 
 // Public landing page; the dashboard lives at /app.
 export default function Home() {
   return (
     <main className="relative flex h-dvh flex-col overflow-hidden bg-ink">
+      <LandingKeys />
       <header className="relative z-10 flex items-center justify-between border-b border-line px-6 py-2 sm:px-8">
         <Logo className="size-16" />
         <nav className="flex items-center gap-6 text-sm">
@@ -18,7 +20,7 @@ export default function Home() {
             CLI
           </a>
           <Link className="rounded-full border border-cream/30 bg-ink/40 px-4 py-1.5 backdrop-blur hover:border-cream/60" href="/app">
-            Dashboard
+            Dashboard <span className="ml-1 font-mono text-[11px] text-mist">D</span>
           </Link>
         </nav>
       </header>
