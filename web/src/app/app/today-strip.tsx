@@ -6,6 +6,7 @@ import type { SessionRow } from "@/lib/sessions";
 
 import { calendarFeedUrl } from "./calendar-actions";
 import { useActiveSession } from "./active-session";
+import { useCalendarEvents } from "./use-calendar-events";
 
 const OUTCOME_COLOR: Record<string, string> = {
   done: "border-mint/70 bg-mint/15",
@@ -16,6 +17,7 @@ const OUTCOME_COLOR: Record<string, string> = {
 // Today as one column of hours, docked beside the main column: today's sessions and a line for now.
 export function TodayStrip({ rows, onOpen, readOnly = false }: { rows: readonly SessionRow[]; onOpen?: (id: string) => void; readOnly?: boolean }) {
   const active = useActiveSession();
+  const calendarEvents = useCalendarEvents(!readOnly);
   const [now, setNow] = useState<Date | null>(null);
   useEffect(() => {
     setNow(new Date());
@@ -68,6 +70,18 @@ export function TodayStrip({ rows, onOpen, readOnly = false }: { rows: readonly 
         <div className="relative border-l border-line">
           {hours.map((h, i) => (
             <div aria-hidden="true" className="absolute inset-x-0 border-t border-line/40" key={h} style={{ top: pct(i) }} />
+          ))}
+          {/* Google Calendar events, under your sessions and quieter: hatched grey. */}
+          {calendarEvents.map((e) => (
+            <div
+              className="absolute inset-x-0.5 overflow-hidden rounded-md border border-cream/15 bg-[repeating-linear-gradient(135deg,rgb(242_239_226/0.07)_0_4px,transparent_4px_8px)] px-1.5 py-0.5 text-[10px] leading-tight text-mist"
+              data-testid="cal-event"
+              key={e.start.toISOString() + e.summary}
+              style={{ top: y(e.start), height: height(e.start, e.end) }}
+              title={`${e.summary} · ${e.start.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`}
+            >
+              {e.summary}
+            </div>
           ))}
           {today.map((r) => (
             <button

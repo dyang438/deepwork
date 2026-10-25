@@ -8,7 +8,10 @@ import { googleTokenCache } from "./schema";
 import { CALENDAR_SCOPES } from "./calendar-scopes";
 
 export type NextEvent = { summary: string; start: string };
-export type CalendarStatus = { connected: false } | { connected: true; next: NextEvent | null; reconnect?: true };
+export type DayEvent = { summary: string; start: string; end: string };
+export type CalendarStatus =
+  | { connected: false }
+  | { connected: true; next: NextEvent | null; events: DayEvent[]; reconnect?: true };
 
 type Account = { accessToken: string | null; refreshToken: string | null; expiresAt: Date | null; scope: string | null };
 
@@ -65,6 +68,7 @@ type GEvent = {
   transparency?: string;
   eventType?: string;
   start?: { dateTime?: string; date?: string };
+  end?: { dateTime?: string; date?: string };
   attendees?: { self?: boolean; responseStatus?: string }[];
 };
 
@@ -84,13 +88,16 @@ async function ownGrant(userId: string): Promise<Account | null> {
   return r ? { accessToken: null, refreshToken: r.refresh_token, expiresAt: null, scope: r.scope } : null;
 }
 
-/** The user's next busy event in the next 24 hours, read live from Google and not stored anywhere. */
-export async function calendarStatus(userId: string): Promise<CalendarStatus> {
+/**
+ * The user's busy events between from and to (their local day, from the browser), plus the next one starting after now.
+ * Read live from Google and not stored anywhere.
+ */
+export async function calendarStatus(userId: string, from?: Date, to?: Date): Promise<CalendarStatus> {
   const own = await ownGrant(userId);
   const account = own && hasCalendarScope(own.scope) ? own : await googleAccount(userId);
   if (!account || !hasCalendarScope(account.scope)) return { connected: false };
   const token = await accessToken(userId, account);
-  if (!token) return { connected: true, next: null, reconnect: true };
+  if (!token) return { connected: true, next: null, events: [], reconnect: true };
   try {
     const list = await google<{ items?: { id: string; selected?: boolean; primary?: boolean }[] }>(
       token,
@@ -99,14 +106,15 @@ export async function calendarStatus(userId: string): Promise<CalendarStatus> {
     const calendars = (list?.items ?? []).filter((c) => c.primary || c.selected).map((c) => c.id);
     if (!calendars.length) calendars.push("primary");
     const now = new Date();
-    const timeMax = new Date(now.getTime() + 24 * 3600_000);
-    const fields = "items(summary,status,transparency,eventType,start,attendees(self,responseStatus))";
+    const timeMin = from && from < now ? from : now;
+    const timeMax = new Date(Math.max(now.getTime() + 24 * 3600_000, to?.getTime() ?? 0));
+    const fields = "items(summary,status,transparency,eventType,start,end,attendees(self,responseStatus))";
     const results = await Promise.all(
       calendars.slice(0, 10).map((id) =>
         google<{ items?: GEvent[] }>(
           token,
           `/calendars/${encodeURIComponent(id)}/events?singleEvents=true&orderBy=startTime&maxResults=15` +
-            `&timeMin=${now.toISOString()}&timeMax=${timeMax.toISOString()}&fields=${encodeURIComponent(fields)}`,
+            `&timeMin=${timeMin.toISOString()}&timeMax=${timeMax.toISOString()}&fields=${encodeURIComponent(fields)}`,
         ),
       ),
     );
@@ -118,13 +126,19 @@ export async function calendarStatus(userId: string): Promise<CalendarStatus> {
           e.transparency !== "transparent" && // "free" events don't block time
           e.eventType !== "workingLocation" &&
           !!e.start?.dateTime && // all-day events don't have a start time to stop before
-          !e.attendees?.some((a) => a.self && a.responseStatus === "declined") &&
-          new Date(e.start.dateTime).getTime() > now.getTime(),
+          !e.attendees?.some((a) => a.self && a.responseStatus === "declined"),
       )
       .sort((a, b) => new Date(a.start!.dateTime!).getTime() - new Date(b.start!.dateTime!).getTime());
-    const first = busy[0];
-    return { connected: true, next: first ? { summary: first.summary || "Busy", start: first.start!.dateTime! } : null };
+    const first = busy.find((e) => new Date(e.start!.dateTime!).getTime() > now.getTime());
+    const events = busy
+      .filter((e) => (!from || new Date(e.end?.dateTime ?? e.start!.dateTime!) > from) && (!to || new Date(e.start!.dateTime!) < to))
+      .map((e) => ({ summary: e.summary || "Busy", start: e.start!.dateTime!, end: e.end?.dateTime ?? e.start!.dateTime! }));
+    return {
+      connected: true,
+      next: first ? { summary: first.summary || "Busy", start: first.start!.dateTime! } : null,
+      events,
+    };
   } catch {
-    return { connected: true, next: null, reconnect: true };
+    return { connected: true, next: null, events: [], reconnect: true };
   }
 }

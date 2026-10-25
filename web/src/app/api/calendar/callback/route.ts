@@ -30,6 +30,8 @@ export async function GET(request: Request) {
   });
   if (!res.ok) return back("error");
   const t = (await res.json()) as { access_token: string; expires_in: number; refresh_token?: string; scope?: string };
+  // Field names only, never values: shows whether Google sent a refresh grant.
+  console.log("[calendar] token response fields:", Object.keys(t).join(","));
   if (!CALENDAR_SCOPES.every((s) => t.scope?.includes(s))) return back("declined"); // unticked a permission
   const db = getDb();
   if (t.refresh_token)
