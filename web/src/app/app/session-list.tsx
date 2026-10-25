@@ -29,7 +29,7 @@ import {
   updateSession,
   type WriteResult,
 } from "./actions";
-import { CalendarView } from "./calendar-view";
+import { TodayStrip } from "./today-strip";
 import { ConfirmDelete } from "./confirm-delete";
 import { SessionDrawer, type SessionEdit } from "./session-drawer";
 
@@ -188,7 +188,8 @@ export function SessionList({
   const [editing, setEditing] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<OptimisticRow | null>(null); // the delete dialog
   // Which view the Personal tab shows: the overview, the session history (h / Down), or the calendar (c).
-  const [view, setView] = useState<"overview" | "history" | "calendar">("overview");
+  const [view, setView] = useState<"overview" | "history">("overview");
+  const [showToday, setShowToday] = useState(true);
   const history = view === "history";
   const setHistory = (on: boolean) => setView(on ? "history" : "overview");
   const keys = useRef({
@@ -215,22 +216,24 @@ export function SessionList({
       if (e.key === "+" || e.key === "=") {
         setHistory(false); // the composer lives on the overview
         setComposing(true);
-      }
-      else if (e.key === "c") {
-        setView(k.view === "calendar" ? "overview" : "calendar");
-        setSel(-1);
-      } else if (e.key === "Escape" && k.view === "calendar") setView("overview");
+      } else if (e.key === "c") setShowToday((v) => !v);
       else if (e.key === "h" && !k.history) {
         setView("history");
         setSel(k.rows.length ? 0 : -1);
-      } else if ((e.key === "ArrowDown" || e.key === "j") && !k.history && k.view !== "calendar") {
+      } else if ((e.key === "ArrowDown" || e.key === "j") && !k.history) {
         setHistory(true);
         setSel(k.rows.length ? 0 : -1);
-      } else if (e.key === "ArrowDown" || e.key === "j") setSel(Math.min(k.sel + 1, k.rows.length - 1));
-      else if ((e.key === "ArrowUp" || e.key === "k") && k.history && k.sel <= 0) {
+      } else if (e.key === "ArrowDown" || e.key === "j")
+        setSel(Math.min(k.sel + 1, k.rows.length - 1));
+      else if (
+        (e.key === "ArrowUp" || e.key === "k") &&
+        k.history &&
+        k.sel <= 0
+      ) {
         setHistory(false); // Up past the top goes back to the overview.
         setSel(-1);
-      } else if ((e.key === "ArrowUp" || e.key === "k") && k.history) setSel(Math.max(k.sel - 1, 0));
+      } else if ((e.key === "ArrowUp" || e.key === "k") && k.history)
+        setSel(Math.max(k.sel - 1, 0));
       else if (e.key === "Escape" && k.history) {
         setHistory(false);
         setSel(-1);
@@ -275,7 +278,10 @@ export function SessionList({
   const [range, setRange] = useState<"today" | "week">("today");
   const week = useMemo(() => {
     if (clockNow === null) return null; // server render: the server's time zone isn't yours, so wait for the browser
-    const since = range === "week" ? weekStart() : new Date(new Date().setHours(0, 0, 0, 0));
+    const since =
+      range === "week"
+        ? weekStart()
+        : new Date(new Date().setHours(0, 0, 0, 0));
     const mine = rows.filter((r) => r.started_at >= since);
     return {
       hours: mine.reduce((m, r) => m + r.minutes, 0) / 60,
@@ -355,13 +361,13 @@ export function SessionList({
     "cursor-pointer appearance-none border-0 border-b border-transparent bg-transparent p-0 font-mono text-xs uppercase text-mist outline-none [field-sizing:content] hover:text-cream focus:border-mint/60 focus:text-cream";
 
   return (
-    <section>
-      {view === "calendar" ? (
-        <div className="view-up" key="calendar">
-          <h1 className="mt-0 mb-8 text-5xl font-normal tracking-[-0.04em]">Calendar</h1>
-          <CalendarView onOpen={(id) => setEditing(id)} rows={rows} />
+    <section className="relative">
+      {showToday && (
+        <div className="hidden min-[1360px]:absolute min-[1360px]:top-0 min-[1360px]:left-full min-[1360px]:ml-10 min-[1360px]:block min-[1360px]:w-56">
+          <TodayStrip onOpen={(id) => setEditing(id)} rows={rows} />
         </div>
-      ) : !history ? (
+      )}
+      {!history ? (
         <div className="view-down" key="overview">
           <h1 className="mt-0 mb-10 text-5xl font-normal tracking-[-0.04em]">
             Your deep work
@@ -381,9 +387,18 @@ export function SessionList({
           </div>
           <dl className="mb-10 grid grid-cols-3 overflow-hidden rounded-2xl border border-line">
             {[
-              [range === "today" ? "Deep hours today" : "Deep hours this week", week ? week.hours.toFixed(1) : "–"],
-              [range === "today" ? "Sessions today" : "Sessions this week", week ? String(week.count) : "–"],
-              ["Goals hit", week?.count ? `${week.done} of ${week.count}` : "–"],
+              [
+                range === "today" ? "Deep hours today" : "Deep hours this week",
+                week ? week.hours.toFixed(1) : "–",
+              ],
+              [
+                range === "today" ? "Sessions today" : "Sessions this week",
+                week ? String(week.count) : "–",
+              ],
+              [
+                "Goals hit",
+                week?.count ? `${week.done} of ${week.count}` : "–",
+              ],
             ].map(([label, value], i) => (
               <div
                 key={label}
@@ -499,9 +514,20 @@ export function SessionList({
                   onClick={() => setComposing(true)}
                   type="button"
                 >
-                  <span aria-hidden="true" className="h-px flex-1 bg-line transition group-hover:bg-mint/25" />
-                  <span aria-hidden="true" className="font-mono text-2xl leading-none">+</span>
-                  <span aria-hidden="true" className="h-px flex-1 bg-line transition group-hover:bg-mint/25" />
+                  <span
+                    aria-hidden="true"
+                    className="h-px flex-1 bg-line transition group-hover:bg-mint/25"
+                  />
+                  <span
+                    aria-hidden="true"
+                    className="font-mono text-2xl leading-none"
+                  >
+                    +
+                  </span>
+                  <span
+                    aria-hidden="true"
+                    className="h-px flex-1 bg-line transition group-hover:bg-mint/25"
+                  />
                 </button>
               }
               initial={active.rows}
@@ -554,7 +580,7 @@ export function SessionList({
             </button>
             <button
               className="cursor-pointer bg-transparent p-0 text-mist/70 hover:text-cream"
-              onClick={() => setView("calendar")}
+              onClick={() => setShowToday((v) => !v)}
               type="button"
             >
               Calendar
