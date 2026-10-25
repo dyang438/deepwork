@@ -4,7 +4,7 @@ import { desc, eq } from "drizzle-orm";
 
 import { getDb } from "./db";
 import { getRealtime } from "./realtime";
-import { activeSessions, deepSessions } from "./schema";
+import { activeSessions, cliAgents, deepSessions } from "./schema";
 
 // The only place the live query is built, so the server read, the seal and every renewal match.
 // `userId` must come from getUser(), never from the client.
@@ -16,6 +16,7 @@ function sessionsQuery(userId: string) {
       minutes: deepSessions.minutes,
       outcome: deepSessions.outcome,
       focus_pct: deepSessions.focus_pct,
+      notes: deepSessions.notes,
       started_at: deepSessions.started_at,
     })
     .from(deepSessions)
@@ -56,3 +57,21 @@ export async function loadActive(userId: string) {
 }
 
 export const sealActive = (userId: string) => getRealtime().seal({ query: activeQuery(userId) });
+
+// When the user's Mac agent last checked in (live, so + knows whether it can start a block).
+function agentQuery(userId: string) {
+  return getDb()
+    .select({ user_id: cliAgents.user_id, host: cliAgents.host, seen_at: cliAgents.seen_at })
+    .from(cliAgents)
+    .where(eq(cliAgents.user_id, userId));
+}
+
+export type AgentRow = Awaited<ReturnType<typeof agentQuery>>[number];
+
+export async function loadAgent(userId: string) {
+  const query = agentQuery(userId);
+  const [rows, sealedQuery] = await Promise.all([query, getRealtime().seal({ query })]);
+  return { rows, sealedQuery };
+}
+
+export const sealAgent = (userId: string) => getRealtime().seal({ query: agentQuery(userId) });

@@ -10,9 +10,10 @@
   deepwork login [url]    connect this terminal to your godeep.work account (default https://godeep.work)
   deepwork logout         forget that connection
   deepwork whoami         show which account this terminal is connected to
+  deepwork agent install  start blocks from godeep.work: runs a small agent at login (uninstall / status too)
   deepwork questions      edit your settings in $EDITOR
   deepwork config         print your settings
-Flags: -y (skip questions), -g "goal", --dry-run (no apps quit, no DND, isolated state in ~/.deepwork-dryrun).
+Flags: -y (skip questions), -g "goal", -d (return right away instead of counting down here), --dry-run (no apps quit, no DND, isolated state in ~/.deepwork-dryrun).
 """
 import collections
 import datetime as dt
@@ -22,6 +23,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import signal
 import socketserver
 import subprocess
@@ -198,10 +200,11 @@ class Web:
     def enabled(self):
         return bool(self.server and self.token)
 
-    def call(self, method, path, body=None, token=True, timeout=8):
+    def call(self, method, path, body=None, token=True, timeout=8, headers=None):
         req = urllib.request.Request(self.server.rstrip("/") + path, method=method,
                                      data=None if body is None else json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json", "User-Agent": "deepwork-cli"})
+                                     headers={"Content-Type": "application/json", "User-Agent": "deepwork-cli",
+                                              **(headers or {})})
         if token:
             req.add_header("Authorization", "Bearer " + self.token)
         try:
@@ -259,6 +262,80 @@ def login(cfg, server):
     print("Connected as %s." % web.call("GET", "/api/cli/whoami")[1].get("email"))
     if cfg.store.local():
         print("Uploaded %d past session(s)." % web.sync(cfg.store.local()))
+    if not os.path.exists(AGENT_PLIST):
+        print("Next: deepwork agent install, so + on godeep.work starts blocks on this Mac.")
+
+
+AGENT_LABEL = "work.godeep.deepwork-agent"
+AGENT_PLIST = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % AGENT_LABEL)
+
+
+def agent(cfg):
+    """Long-running: poll godeep.work for start/stop commands from the dashboard and run them on this Mac."""
+    every = float(os.environ.get("DEEPWORK_AGENT_EVERY", "3"))
+    me = [sys.executable, os.path.realpath(__file__)] + (["--dry-run"] if cfg.dry else [])
+    print("%s agent up on %s" % (iso(now()), socket.gethostname()), flush=True)
+    while True:
+        cfg.web = Web(cfg)  # re-read credentials, so a new `deepwork login` is picked up
+        if not cfg.web.enabled:
+            print("%s not connected; run deepwork login" % iso(now()), flush=True)
+            time.sleep(30)
+            continue
+        try:
+            cmd = cfg.web.call("POST", "/api/cli/agent", {}, timeout=10,
+                               headers={"X-Deepwork-Host": socket.gethostname()})[1].get("command")
+        except Exception as e:
+            print("%s poll failed: %s" % (iso(now()), e), flush=True)
+            time.sleep(max(every, 10))
+            continue
+        if cmd and cmd["kind"] == "start":
+            if os.path.exists(cfg.session):
+                print("%s start ignored: a session is already running" % iso(now()), flush=True)
+            else:
+                print("%s start %s min: %s" % (iso(now()), cmd["minutes"], cmd["goal"]), flush=True)
+                subprocess.run(me + [str(cmd["minutes"]), "-y", "-d", "--from-web", "-g", cmd["goal"]],
+                               stdin=subprocess.DEVNULL, timeout=120)
+        elif cmd and cmd["kind"] == "stop":
+            print("%s stop" % iso(now()), flush=True)
+            subprocess.run(me + ["off", "-y"], stdin=subprocess.DEVNULL, timeout=120)
+        time.sleep(every)
+
+
+def agent_ctl(cfg, action):
+    uid = str(os.getuid())
+    if action == "install":
+        if not cfg.web.enabled:
+            sys.exit("Connect first: deepwork login")
+        os.makedirs(os.path.dirname(AGENT_PLIST), exist_ok=True)
+        log = os.path.join(cfg.state, "agent.log")
+        args = "".join("<string>%s</string>" % a for a in (sys.executable, os.path.realpath(__file__), "agent"))
+        with open(AGENT_PLIST, "w") as f:
+            f.write("""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>%s</string>
+  <key>ProgramArguments</key><array>%s</array>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>%s</string>
+  <key>StandardErrorPath</key><string>%s</string>
+</dict></plist>
+""" % (AGENT_LABEL, args, log, log))
+        subprocess.run(["launchctl", "bootout", "gui/%s/%s" % (uid, AGENT_LABEL)], capture_output=True)
+        r = subprocess.run(["launchctl", "bootstrap", "gui/" + uid, AGENT_PLIST], capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit("launchctl couldn't start the agent: %s" % r.stderr.strip())
+        return print("Agent installed: + on godeep.work now starts blocks on this Mac. Log: %s" % log)
+    if action == "uninstall":
+        subprocess.run(["launchctl", "bootout", "gui/%s/%s" % (uid, AGENT_LABEL)], capture_output=True)
+        rm(AGENT_PLIST)
+        return print("Agent removed.")
+    if action == "status":
+        r = subprocess.run(["launchctl", "print", "gui/%s/%s" % (uid, AGENT_LABEL)], capture_output=True, text=True)
+        state = re.search(r"state = (\w+)", r.stdout)
+        return print("Agent: %s" % (state.group(1) if state else "not installed"))
+    return agent(cfg)
 
 
 # ---------- storage: a local log, mirrored to Postgres when database_url is set ----------
@@ -395,7 +472,7 @@ def shutdown_command(cfg):
 
 # ---------- session lifecycle ----------
 
-def start(cfg, minutes, assume_yes, goal):
+def start(cfg, minutes, assume_yes, goal, detach=False, from_web=False):
     cfg.ensure_dirs()
     if os.path.exists(cfg.session):
         s = read_json(cfg.session) or {}
@@ -436,11 +513,36 @@ def start(cfg, minutes, assume_yes, goal):
     if cfg.conf["sounds"].get("start"):
         act(cfg, "sound", cfg.conf["sounds"]["start"])
     act(cfg, "shortcut", SHORTCUT_ON)
+    foreground = not detach and sys.stdin.isatty() and sys.stdout.isatty()
+    if from_web:
+        session["from_web"] = True  # nobody is at a terminal: the watchdog logs it when it ends
+    if foreground:
+        session["fg_pid"] = os.getpid()  # the watchdog leaves the shutdown to this terminal while it is alive
     session["watchdog_pid"] = spawn_watchdog(cfg)
     write_json(cfg.session, session)
     print("Deep work until %s (%g min). Goal: %s%s" % (hm(end_ts), minutes, session["goal"],
                                                        "  [dry run]" if cfg.dry else ""))
-    print('Stray thought? deepwork capture "..."   Stop early: deepwork off')
+    if not foreground:
+        return print('Stray thought? deepwork capture "..."   Stop early: deepwork off')
+    print('Stray thought? deepwork capture "..." from another terminal.   Ctrl-C ends early.')
+    wait_here(cfg, session, assume_yes)
+
+
+def wait_here(cfg, s, assume_yes):
+    """Count down in this terminal, then run the shutdown questions here when the watchdog ends the block."""
+    try:
+        while os.path.exists(cfg.session):
+            left = max(0, s["end"] - now())
+            sys.stdout.write("\r  %s left   " % ("%d:%02d:%02d" % (left // 3600, left % 3600 // 60, left % 60)
+                                                if left >= 3600 else "%02d:%02d" % (left // 60, left % 60)))
+            sys.stdout.flush()
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nEnding early.")
+        return off(cfg, assume_yes)
+    print("\a")  # bell: time is up
+    if os.path.exists(cfg.pending):
+        shutdown(cfg, assume_yes)
 
 
 def claim_and_restore(cfg, ended_by):
@@ -825,8 +927,14 @@ def watchdog(cfg):
             return
         if now() >= s["end"]:
             if claim_and_restore(cfg, "timer"):
-                act(cfg, "notify", "Time is up: %s. Run deepwork off for the shutdown." % s.get("goal"))
-                act(cfg, "terminal", shutdown_command(cfg))
+                if s.get("from_web"):
+                    shutdown(cfg, True)
+                    act(cfg, "notify", "Time is up: %s. Rate it on godeep.work." % s.get("goal"))
+                elif pid_alive(s.get("fg_pid")):  # the terminal that started it runs the shutdown itself
+                    act(cfg, "notify", "Time is up: %s." % s.get("goal"))
+                else:
+                    act(cfg, "notify", "Time is up: %s. Run deepwork off for the shutdown." % s.get("goal"))
+                    act(cfg, "terminal", shutdown_command(cfg))
             return
         for a in cfg.apps:
             act(cfg, "quit", a)
@@ -853,7 +961,7 @@ def edit_config(cfg):
 
 
 def main(argv):
-    flags = {"--dry-run", "-y", "--yes", "--all"}
+    flags = {"--dry-run", "-y", "--yes", "--all", "-d", "--detach", "--from-web"}
     goal, rest, i = None, [], 0
     while i < len(argv):
         if argv[i] in ("-g", "--goal") and i + 1 < len(argv):
@@ -893,6 +1001,8 @@ def main(argv):
             sys.exit("Sync failed: %s" % e)
     if cmd == "login":
         return login(cfg, rest[1] if len(rest) > 1 else os.environ.get("DEEPWORK_SERVER", DEFAULT_SERVER))
+    if cmd == "agent":
+        return agent_ctl(cfg, rest[1] if len(rest) > 1 else "run")
     if cmd == "logout":
         rm(cfg.credentials)
         return print("Disconnected this terminal from godeep.work.")
@@ -916,7 +1026,7 @@ def main(argv):
         sys.exit("unknown command %r. Try: deepwork help" % cmd)
     if minutes <= 0 or (minutes < 1 and not dry):
         sys.exit("minutes must be at least 1")
-    start(cfg, minutes, assume_yes, goal)
+    start(cfg, minutes, assume_yes, goal, detach="-d" in argv or "--detach" in argv, from_web="--from-web" in argv)
 
 
 if __name__ == "__main__":

@@ -44,3 +44,14 @@ body {
     transform: translateY(-4px);
   }
 }
+
+/* The session editor slides in from the right. */
+.drawer {
+  animation: drawer-in 200ms ease-out;
+}
+@keyframes drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}

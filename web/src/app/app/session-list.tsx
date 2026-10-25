@@ -3,37 +3,71 @@
 import type { SealedLiveQuery } from "@neon/realtime/client";
 // @neon/realtime-react's build has no "use client" directive: import it only from client modules.
 import { useLiveQuery } from "@neon/realtime-react";
-import { type FormEvent, startTransition, useCallback, useEffect, useMemo, useOptimistic, useState } from "react";
+import {
+  type FormEvent,
+  startTransition,
+  useCallback,
+  useEffect,
+  useMemo,
+  useOptimistic,
+  useRef,
+  useState,
+} from "react";
 
 import { leaveSession, renewOrLeave } from "@/auth/session-lost";
-import type { SessionRow } from "@/lib/sessions"; // type-only: no server code reaches the browser
+import type { ActiveRow, AgentRow, SessionRow } from "@/lib/sessions"; // type-only: no server code reaches the browser
 import type { Defaults } from "@/lib/settings";
 
 import { LocalTime } from "../local-time";
-import { deleteSession, logSession, setFocus, type WriteResult } from "./actions";
+import { ActiveBanner } from "./active-banner";
+import {
+  deleteSession,
+  logSession,
+  setFocus,
+  startBlock,
+  stopBlock,
+  updateSession,
+  type WriteResult,
+} from "./actions";
+import { SessionDrawer, type SessionEdit } from "./session-drawer";
 
 type OptimisticRow = SessionRow & { pending?: true };
 type OptimisticAction =
   | { type: "add"; row: SessionRow }
   | { type: "delete"; id: string }
-  | { type: "focus"; id: string; focus_pct: number | null };
+  | { type: "focus"; id: string; focus_pct: number | null }
+  | { type: "edit"; id: string; edit: SessionEdit };
 type Notice = { tone: "error" | "info"; text: string };
 
 // React re-applies pending actions to every new live snapshot, so each case must be safe to re-run.
-function applyOptimisticAction(rows: readonly OptimisticRow[], action: OptimisticAction): readonly OptimisticRow[] {
+function applyOptimisticAction(
+  rows: readonly OptimisticRow[],
+  action: OptimisticAction,
+): readonly OptimisticRow[] {
   switch (action.type) {
     case "add":
-      return rows.some((r) => r.id === action.row.id) ? rows : [{ ...action.row, pending: true }, ...rows];
+      return rows.some((r) => r.id === action.row.id)
+        ? rows
+        : [{ ...action.row, pending: true }, ...rows];
     case "delete":
       return rows.filter((r) => r.id !== action.id);
     case "focus":
-      return rows.map((r) => (r.id === action.id && r.focus_pct !== action.focus_pct ? { ...r, focus_pct: action.focus_pct, pending: true } : r));
+      return rows.map((r) =>
+        r.id === action.id && r.focus_pct !== action.focus_pct
+          ? { ...r, focus_pct: action.focus_pct, pending: true }
+          : r,
+      );
+    case "edit":
+      return rows.map((r) =>
+        r.id === action.id ? { ...r, ...action.edit, pending: true } : r,
+      );
   }
 }
 
 // Live rows don't follow the query's ORDER BY, so sort here (the server render runs the same sort).
 const newestFirst = (a: OptimisticRow, b: OptimisticRow) =>
-  b.started_at.getTime() - a.started_at.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
+  b.started_at.getTime() - a.started_at.getTime() ||
+  (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
 
 const SYNC_TIMEOUT_MS = 10_000;
 const FOCUS_STEPS = [100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0];
@@ -46,11 +80,15 @@ function weekStart(now = new Date()) {
 }
 
 export function SessionList({
+  active,
+  agent,
   defaults,
   initialSessions,
   sealedQuery,
   userId,
 }: {
+  active: { rows: ActiveRow[]; sealedQuery: SealedLiveQuery<ActiveRow> };
+  agent: { rows: AgentRow[]; sealedQuery: SealedLiveQuery<AgentRow> };
   defaults: Defaults;
   initialSessions: SessionRow[];
   sealedQuery: SealedLiveQuery<SessionRow>;
@@ -62,32 +100,145 @@ export function SessionList({
   const refreshQuery = useCallback(
     () =>
       renewOrLeave<SealedLiveQuery<SessionRow>>(() =>
-        fetch("/api/sessions/live-query", { method: "POST", cache: "no-store", body: JSON.stringify({ userId }) }),
+        fetch("/api/sessions/live-query", {
+          method: "POST",
+          cache: "no-store",
+          body: JSON.stringify({ userId }),
+        }),
       ),
     [userId],
   );
-  const { data, status, utils } = useLiveQuery(query, { initialData: initialSessions, refreshQuery });
+  const { data, status, utils } = useLiveQuery(query, {
+    initialData: initialSessions,
+    refreshQuery,
+  });
 
-  const [optimistic, updateOptimistically] = useOptimistic<readonly OptimisticRow[], OptimisticAction>(
-    data ?? initialSessions,
-    applyOptimisticAction,
-  );
+  const [optimistic, updateOptimistically] = useOptimistic<
+    readonly OptimisticRow[],
+    OptimisticAction
+  >(data ?? initialSessions, applyOptimisticAction);
   const rows = useMemo(() => [...optimistic].sort(newestFirst), [optimistic]);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [composing, setComposing] = useState(false);
 
-  // Typing + (or =, the same key unshifted) anywhere outside a text field opens the composer.
+  // Is `deepwork agent` running on a Mac? It checks in at least every ~15 s; past 45 s it counts as offline.
+  const [agentSealed] = useState(agent.sealedQuery);
+  const refreshAgent = useCallback(
+    () =>
+      renewOrLeave<SealedLiveQuery<AgentRow>>(() =>
+        fetch("/api/agent/live-query", {
+          method: "POST",
+          cache: "no-store",
+          body: JSON.stringify({ userId }),
+        }),
+      ),
+    [userId],
+  );
+  const agentRow = (useLiveQuery(agentSealed, {
+    initialData: agent.rows,
+    refreshQuery: refreshAgent,
+  }).data ?? agent.rows)[0];
+  const [clockNow, setClockNow] = useState<number | null>(null);
+  useEffect(() => {
+    setClockNow(Date.now());
+    const t = setInterval(() => setClockNow(Date.now()), 5000);
+    return () => clearInterval(t);
+  }, []);
+  const macOnline =
+    !!agentRow &&
+    clockNow !== null &&
+    clockNow - agentRow.seen_at.getTime() < 45_000;
+  const [starting, setStarting] = useState(false);
+  useEffect(() => {
+    if (!starting) return;
+    const t = setTimeout(() => {
+      setStarting(false);
+      setNotice({
+        tone: "error",
+        text: "Your Mac didn't pick it up. Is deepwork agent running?",
+      });
+    }, 20_000);
+    return () => clearTimeout(t);
+  }, [starting]);
+  const onActive = useCallback(() => setStarting(false), []);
+
+  function startFromForm(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const fd = new FormData(event.currentTarget);
+    const goal = String(fd.get("goal") ?? "").trim();
+    const minutes = Number(fd.get("minutes"));
+    if (!goal || !Number.isInteger(minutes) || minutes < 1) return;
+    setComposing(false);
+    setNotice(null);
+    setStarting(true);
+    startTransition(async () => {
+      const r = await startBlock(userId, { goal, minutes }).catch(() => null);
+      if (!r?.ok) {
+        setStarting(false);
+        if (r?.reason === "UNAUTHENTICATED") leaveSession();
+        else setNotice({ tone: "error", text: "Couldn't start the block." });
+      }
+    });
+  }
+
+  // Keyboard, outside text fields: + (or =) opens the composer; j / k move through sessions, Enter opens one.
+  const [sel, setSel] = useState(-1);
+  const [editing, setEditing] = useState<string | null>(null);
+  const keys = useRef({
+    rows: [] as readonly OptimisticRow[],
+    sel,
+    composing,
+    editing,
+  });
+  keys.current = { rows, sel, composing, editing };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
-      if ((e.key !== "+" && e.key !== "=") || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || document.querySelector('[role="dialog"]')) return;
+      const k = keys.current;
+      if (e.metaKey || e.ctrlKey || e.altKey || k.composing || k.editing)
+        return;
+      if (
+        t.isContentEditable ||
+        ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) ||
+        document.querySelector('[role="dialog"]')
+      )
+        return;
+      if (e.key === "+" || e.key === "=") setComposing(true);
+      else if (e.key === "j") setSel(Math.min(k.sel + 1, k.rows.length - 1));
+      else if (e.key === "k") setSel(Math.max(k.sel - 1, 0));
+      else if (e.key === "Enter" && k.rows[k.sel]) setEditing(k.rows[k.sel].id);
+      else return;
       e.preventDefault();
-      setComposing(true);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+  useEffect(() => {
+    document
+      .querySelector(`[data-row="${sel}"]`)
+      ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [sel]);
+  const editingRow = rows.find((r) => r.id === editing);
+
+  function saveEdit(id: string, edit: SessionEdit | null) {
+    setEditing(null);
+    if (!edit) return;
+    mutate(
+      { type: "edit", id, edit },
+      () =>
+        updateSession(userId, {
+          id,
+          goal: edit.goal,
+          minutes: edit.minutes,
+          outcome: edit.outcome as
+            "done" | "partial" | "not done" | "unrecorded",
+          focus_pct: edit.focus_pct,
+          notes: edit.notes,
+          started_at: edit.started_at.toISOString(),
+        }),
+      `Couldn't save "${edit.goal}".`,
+    );
+  }
 
   const week = useMemo(() => {
     const since = weekStart();
@@ -99,7 +250,11 @@ export function SessionList({
     };
   }, [rows]);
 
-  function mutate(action: OptimisticAction, write: () => Promise<WriteResult>, failure: string) {
+  function mutate(
+    action: OptimisticAction,
+    write: () => Promise<WriteResult>,
+    failure: string,
+  ) {
     setNotice(null);
     startTransition(async () => {
       updateOptimistically(action);
@@ -119,7 +274,10 @@ export function SessionList({
       try {
         await utils.awaitTxId(result.txid, SYNC_TIMEOUT_MS);
       } catch {
-        setNotice({ tone: "info", text: "Saved. It will appear when live updates reconnect." });
+        setNotice({
+          tone: "info",
+          text: "Saved. It will appear when live updates reconnect.",
+        });
       }
     });
   }
@@ -135,10 +293,25 @@ export function SessionList({
     if (!goal || !Number.isInteger(minutes) || minutes < 1) return;
     form.reset();
     setComposing(false);
-    const row: SessionRow = { id: crypto.randomUUID(), goal, minutes, outcome, focus_pct, started_at: new Date() };
+    const row: SessionRow = {
+      id: crypto.randomUUID(),
+      goal,
+      minutes,
+      outcome,
+      focus_pct,
+      notes: null,
+      started_at: new Date(),
+    };
     mutate(
       { type: "add", row },
-      () => logSession(userId, { id: row.id, goal, minutes, outcome: outcome as "done" | "partial" | "not done", focus_pct }),
+      () =>
+        logSession(userId, {
+          id: row.id,
+          goal,
+          minutes,
+          outcome: outcome as "done" | "partial" | "not done",
+          focus_pct,
+        }),
       `Couldn't log "${goal}".`,
     );
   }
@@ -155,9 +328,15 @@ export function SessionList({
           ["Sessions this week", String(week.count)],
           ["Goals hit", week.count ? `${week.done} of ${week.count}` : "–"],
         ].map(([label, value], i) => (
-          <div key={label} className={`bg-panel/80 p-5 ${i ? "border-l border-line" : ""}`}>
+          <div
+            key={label}
+            className={`bg-panel/80 p-5 ${i ? "border-l border-line" : ""}`}
+          >
             <dt className="eyebrow text-[11px]">{label}</dt>
-            <dd className="m-0 mt-2 text-4xl tracking-[-0.04em] tabular-nums" data-testid={label}>
+            <dd
+              className="m-0 mt-2 text-4xl tracking-[-0.04em] tabular-nums"
+              data-testid={label}
+            >
               {value}
             </dd>
           </div>
@@ -168,7 +347,7 @@ export function SessionList({
         <form
           className="composer border-l border-mint/50 py-1 pl-5"
           onKeyDown={(e) => e.key === "Escape" && setComposing(false)}
-          onSubmit={logFromForm}
+          onSubmit={macOnline ? startFromForm : logFromForm}
         >
           <input
             aria-label="Goal"
@@ -177,90 +356,207 @@ export function SessionList({
             className="w-full border-0 bg-transparent p-0 text-2xl tracking-[-0.02em] text-cream outline-none placeholder:text-mist/50"
             maxLength={200}
             name="goal"
-            placeholder="What did this block produce?"
+            placeholder={
+              macOnline
+                ? "What will this block produce?"
+                : "What did this block produce?"
+            }
             required
           />
           <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 font-mono text-xs text-mist">
             <label className="flex items-center gap-1.5">
-              <input aria-label="Minutes" className={`${quiet} w-8 text-right [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none`} defaultValue={defaults.minutes} max={600} min={1} name="minutes" required type="number" />
+              <input
+                aria-label="Minutes"
+                className={`${quiet} w-8 text-right [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none`}
+                defaultValue={defaults.minutes}
+                max={600}
+                min={1}
+                name="minutes"
+                required
+                type="number"
+              />
               MIN
             </label>
-            <span aria-hidden="true">·</span>
-            <select aria-label="Outcome" className={quiet} defaultValue={defaults.outcome} name="outcome">
-              <option value="done">Done</option>
-              <option value="partial">Partial</option>
-              <option value="not done">Not done</option>
-            </select>
-            <span aria-hidden="true">·</span>
-            <select aria-label="Focus" className={quiet} defaultValue={defaults.focus ?? ""} name="focus">
-              <option value="">Focus –</option>
-              {FOCUS_STEPS.map((f) => (
-                <option key={f} value={f}>Focus {f}%</option>
-              ))}
-            </select>
+            {macOnline ? (
+              <span className="text-mint/80">
+                {agentRow?.host
+                  ? `ON ${agentRow.host.replace(/\.local$/, "").toUpperCase()}`
+                  : "ON YOUR MAC"}
+              </span>
+            ) : (
+              <>
+                <span aria-hidden="true">·</span>
+                <select
+                  aria-label="Outcome"
+                  className={quiet}
+                  defaultValue={defaults.outcome}
+                  name="outcome"
+                >
+                  <option value="done">Done</option>
+                  <option value="partial">Partial</option>
+                  <option value="not done">Not done</option>
+                </select>
+                <span aria-hidden="true">·</span>
+                <select
+                  aria-label="Focus"
+                  className={quiet}
+                  defaultValue={defaults.focus ?? ""}
+                  name="focus"
+                >
+                  <option value="">Focus –</option>
+                  {FOCUS_STEPS.map((f) => (
+                    <option key={f} value={f}>
+                      Focus {f}%
+                    </option>
+                  ))}
+                </select>
+                <span className="normal-case text-mist/70">
+                  Mac offline: logs it as done. Run deepwork agent install to
+                  start blocks from here.
+                </span>
+              </>
+            )}
             <span className="ml-auto flex items-center gap-4">
-              <button className="cursor-pointer text-mist hover:text-cream" onClick={() => setComposing(false)} type="button">
+              <button
+                className="cursor-pointer text-mist hover:text-cream"
+                onClick={() => setComposing(false)}
+                type="button"
+              >
                 ESC
               </button>
-              <button className="cursor-pointer text-mint hover:text-cream" type="submit">
-                LOG ↵
+              <button
+                className="cursor-pointer text-mint hover:text-cream"
+                type="submit"
+              >
+                {macOnline ? "START ↵" : "LOG ↵"}
               </button>
             </span>
           </div>
         </form>
       ) : (
-        <button
-          aria-label="Log a session"
-          className="group flex cursor-pointer items-center gap-3 bg-transparent p-0 text-mist hover:text-cream"
-          onClick={() => setComposing(true)}
-          type="button"
-        >
-          {/* A keycap: the key that opens it. */}
-          <kbd className="flex h-9 min-w-9 items-center justify-center rounded-md border border-line border-b-[3px] bg-panel px-2 font-mono text-lg leading-none text-cream shadow-[inset_0_1px_0_rgb(242_239_226/0.06)] transition group-hover:border-mint/50 group-hover:text-mint group-active:translate-y-px group-active:border-b">
-            +
-          </kbd>
-          <span className="font-mono text-xs uppercase opacity-0 transition group-hover:opacity-100">Log a session</span>
-        </button>
+        <ActiveBanner
+          fallback={
+            <button
+              aria-label="Log a session"
+              className="group flex cursor-pointer items-center gap-3 bg-transparent p-0 text-mist hover:text-cream"
+              onClick={() => setComposing(true)}
+              type="button"
+            >
+              {/* A keycap: the key that opens it. */}
+              <kbd className="flex h-9 min-w-9 items-center justify-center rounded-md border border-line border-b-[3px] bg-panel px-2 font-mono text-lg leading-none text-cream shadow-[inset_0_1px_0_rgb(242_239_226/0.06)] transition group-hover:border-mint/50 group-hover:text-mint group-active:translate-y-px group-active:border-b">
+                +
+              </kbd>
+              <span className="font-mono text-xs uppercase opacity-0 transition group-hover:opacity-100">
+                {macOnline ? "Start a block" : "Log a session"}
+              </span>
+            </button>
+          }
+          initial={active.rows}
+          onActive={onActive}
+          onStop={() =>
+            startTransition(async () => void (await stopBlock(userId)))
+          }
+          sealedQuery={active.sealedQuery}
+          starting={starting}
+          userId={userId}
+        />
       )}
 
       <div className="mt-4 flex h-6 items-center justify-between text-[13px]">
-        <span className={notice?.tone === "error" ? "text-rose" : "text-mist"} role={notice ? "status" : undefined}>
+        <span
+          className={notice?.tone === "error" ? "text-rose" : "text-mist"}
+          role={notice ? "status" : undefined}
+        >
           {notice?.text}
         </span>
         {/* Only a broken connection is worth showing; data-status lets tests wait for the subscription. */}
-        <output className="eyebrow text-[11px] text-rose" data-status={status} data-testid="live-status">
+        <output
+          className="eyebrow text-[11px] text-rose"
+          data-status={status}
+          data-testid="live-status"
+        >
           {status === "error" ? "Live updates stopped" : ""}
         </output>
       </div>
       {status === "error" && (
-        <button className="mt-2 cursor-pointer text-sm font-medium text-rose" onClick={() => window.location.reload()} type="button">
+        <button
+          className="mt-2 cursor-pointer text-sm font-medium text-rose"
+          onClick={() => window.location.reload()}
+          type="button"
+        >
           Reconnect
         </button>
       )}
 
       {rows.length > 0 && (
-        <ul aria-live="polite" className="my-6 list-none border-t border-line p-0">
-          {rows.map((r) => (
+        <ul
+          aria-live="polite"
+          className="my-6 list-none border-t border-line p-0"
+        >
+          {rows.map((r, i) => (
             <li
-              className={`grid grid-cols-[1fr_auto_auto_auto_auto] items-center gap-5 border-b border-line py-4 ${r.pending ? "opacity-50" : ""}`}
+              aria-selected={i === sel}
+              className={`relative -mx-3 grid cursor-pointer grid-cols-[1fr_auto_auto_auto_auto] items-center gap-5 rounded-lg border-b border-line px-3 py-4 hover:bg-cream/[0.03] ${i === sel ? "bg-cream/[0.05]" : ""} ${r.pending ? "opacity-50" : ""}`}
+              data-row={i}
               key={r.id}
+              onClick={() => {
+                setSel(i);
+                setEditing(r.id);
+              }}
             >
-              <span className="min-w-0 break-words">{r.goal}</span>
+              {i === sel && (
+                <span
+                  aria-hidden="true"
+                  className="absolute inset-y-3 left-0 w-0.5 rounded bg-mint"
+                />
+              )}
+              <span className="min-w-0 break-words">
+                {r.goal}
+                {r.notes && (
+                  <span
+                    className="ml-2 font-mono text-[11px] text-mist"
+                    title="Has notes"
+                  >
+                    ¶
+                  </span>
+                )}
+              </span>
               <span className="font-mono text-xs text-mist tabular-nums">
-                {r.minutes} MIN · <span className={r.outcome === "done" ? "text-mint" : r.outcome === "partial" ? "text-ochre" : r.outcome === "not done" ? "text-rose" : "text-mist"}>{r.outcome.toUpperCase()}</span>
+                {r.minutes} MIN ·{" "}
+                <span
+                  className={
+                    r.outcome === "done"
+                      ? "text-mint"
+                      : r.outcome === "partial"
+                        ? "text-ochre"
+                        : r.outcome === "not done"
+                          ? "text-rose"
+                          : "text-mist"
+                  }
+                >
+                  {r.outcome.toUpperCase()}
+                </span>
               </span>
               <select
                 aria-label={`Focus for ${r.goal}`}
                 className={`${quiet} ${r.focus_pct == null ? "" : "text-cream"}`}
+                onClick={(e) => e.stopPropagation()}
                 onChange={(e) => {
-                  const focus_pct = e.target.value === "" ? null : Number(e.target.value);
-                  mutate({ type: "focus", id: r.id, focus_pct }, () => setFocus(userId, { id: r.id, focus_pct }), `Couldn't rate "${r.goal}".`);
+                  const focus_pct =
+                    e.target.value === "" ? null : Number(e.target.value);
+                  mutate(
+                    { type: "focus", id: r.id, focus_pct },
+                    () => setFocus(userId, { id: r.id, focus_pct }),
+                    `Couldn't rate "${r.goal}".`,
+                  );
                 }}
                 value={r.focus_pct ?? ""}
               >
                 <option value="">FOCUS –</option>
                 {FOCUS_STEPS.map((f) => (
-                  <option key={f} value={f}>FOCUS {f}%</option>
+                  <option key={f} value={f}>
+                    FOCUS {f}%
+                  </option>
                 ))}
               </select>
               <span className="text-xs text-mist">
@@ -269,7 +565,14 @@ export function SessionList({
               <button
                 aria-label={`Delete ${r.goal}`}
                 className="cursor-pointer bg-transparent p-2 text-xs text-mist hover:text-rose"
-                onClick={() => mutate({ type: "delete", id: r.id }, () => deleteSession(userId, { id: r.id }), `Couldn't delete "${r.goal}".`)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  mutate(
+                    { type: "delete", id: r.id },
+                    () => deleteSession(userId, { id: r.id }),
+                    `Couldn't delete "${r.goal}".`,
+                  );
+                }}
                 type="button"
               >
                 Delete
@@ -277,6 +580,13 @@ export function SessionList({
             </li>
           ))}
         </ul>
+      )}
+      {editingRow && (
+        <SessionDrawer
+          key={editingRow.id}
+          onClose={(edit) => saveEdit(editingRow.id, edit)}
+          row={editingRow}
+        />
       )}
     </section>
   );

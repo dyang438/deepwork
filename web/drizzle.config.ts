@@ -15,7 +15,7 @@ export default defineConfig({
   dialect: "postgresql",
   // Only manage this example's table, so `drizzle-kit push` against a shared
   // database never proposes dropping other tables.
-  tablesFilter: ["deep_sessions", "active_sessions", "cli_logins", "cli_tokens", "competitions", "competition_members", "user_settings"],
+  tablesFilter: ["deep_sessions", "active_sessions", "cli_logins", "cli_tokens", "competitions", "competition_members", "user_settings", "cli_commands", "cli_agents"],
   dbCredentials: {
     url: process.env.DATABASE_URL,
   },

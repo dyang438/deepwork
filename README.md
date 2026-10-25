@@ -45,6 +45,7 @@ ln -sf ~/deepwork/deepwork ~/.local/bin/deepwork   # any directory on your PATH
 | `deepwork sync` | push the local log to godeep.work and/or the database |
 | `deepwork login` | connect this terminal to your [godeep.work](https://godeep.work) account |
 | `deepwork logout` / `whoami` | disconnect / show the connected account |
+| `deepwork agent install` | let **+** on godeep.work start real blocks on this Mac (`uninstall`, `status`) |
 | `deepwork questions` | edit your settings in `$EDITOR` (falls back to nvim, vim, vi) |
 | `deepwork config` | print your settings |
 
@@ -87,7 +88,8 @@ Flags: `-y` skips the questions, `-g "goal"` sets the goal, `--dry-run` does eve
 
 [godeep.work](https://godeep.work) is the web dashboard. Run `deepwork login` once: the terminal shows a code, your browser opens, you confirm it while signed in (Google or email), and the CLI stores a token in `~/.deepwork/credentials.json` (readable only by you). After that:
 
-- `deepwork 90` shows the block live on the dashboard ("in a deep work block, until 16:30"), and clears it when the block ends.
+- `deepwork 90` counts down in your terminal, shows the block live on the dashboard, and asks the shutdown questions in the same terminal when it ends (Ctrl-C ends early; `-d` returns right away instead).
+- With `deepwork agent install`, a small agent runs at login and checks godeep.work every few seconds. Press **+** on the dashboard, type the goal, Enter: the agent starts a real block on your Mac (apps quit, Do Not Disturb, Chrome blocking), and **END** on the countdown stops it. Web-started blocks log themselves when they end.
 - Each finished session is uploaded with its goal, minutes, outcome and self-reported focus; the local log stays the source of truth, and `deepwork sync` re-sends it safely (no duplicates).
 - **My competitions** ranks members by deep hours and minute-weighted self-reported focus since the competition started, live. Start one and share its invite link.
 

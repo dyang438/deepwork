@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { getUser } from "@/auth/server";
 import { getDb } from "@/lib/db";
-import { deepSessions } from "@/lib/schema";
+import { cliCommands, deepSessions } from "@/lib/schema";
 
 // Typed results rather than throws: in production Next.js hides a thrown error's message.
 export type WriteResult =
@@ -63,4 +63,48 @@ export async function setFocus(pageUserId: string, raw: z.input<typeof focusInpu
     .where(and(eq(deepSessions.id, input.data.id), eq(deepSessions.user_id, user.id)))
     .returning({ txid });
   return toResult(row);
+}
+
+const updateInput = z.object({
+  id: z.uuid(),
+  goal: z.string().trim().min(1).max(200),
+  minutes: z.number().int().min(0).max(1440),
+  outcome: z.enum(["done", "partial", "not done", "unrecorded"]),
+  focus_pct: z.number().int().min(0).max(100).nullable(),
+  notes: z.string().max(20000).nullable(),
+  started_at: z.iso.datetime({ offset: true }),
+});
+
+export async function updateSession(pageUserId: string, raw: z.input<typeof updateInput>): Promise<WriteResult> {
+  const user = await getUser(pageUserId);
+  if (!user) return { kind: "rejected", reason: "UNAUTHENTICATED" };
+  const input = updateInput.safeParse(raw);
+  if (!input.success) return { kind: "rejected", reason: "INVALID_INPUT" };
+  const { id, started_at, notes, ...rest } = input.data;
+  const [row] = await getDb()
+    .update(deepSessions)
+    .set({ ...rest, notes: notes?.trim() ? notes : null, started_at: new Date(started_at) })
+    .where(and(eq(deepSessions.id, id), eq(deepSessions.user_id, user.id)))
+    .returning({ txid });
+  return toResult(row);
+}
+
+export type CommandResult = { ok: true } | { ok: false; reason: "UNAUTHENTICATED" | "INVALID_INPUT" };
+const startInput = z.object({ goal: z.string().trim().min(1).max(200), minutes: z.number().int().min(1).max(600) });
+
+/** Ask the user's Mac (via `deepwork agent`) to start a real deep work block. */
+export async function startBlock(pageUserId: string, raw: z.input<typeof startInput>): Promise<CommandResult> {
+  const user = await getUser(pageUserId);
+  if (!user) return { ok: false, reason: "UNAUTHENTICATED" };
+  const input = startInput.safeParse(raw);
+  if (!input.success) return { ok: false, reason: "INVALID_INPUT" };
+  await getDb().insert(cliCommands).values({ id: crypto.randomUUID(), user_id: user.id, kind: "start", ...input.data });
+  return { ok: true };
+}
+
+export async function stopBlock(pageUserId: string): Promise<CommandResult> {
+  const user = await getUser(pageUserId);
+  if (!user) return { ok: false, reason: "UNAUTHENTICATED" };
+  await getDb().insert(cliCommands).values({ id: crypto.randomUUID(), user_id: user.id, kind: "stop" });
+  return { ok: true };
 }

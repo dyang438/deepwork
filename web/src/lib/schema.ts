@@ -14,6 +14,7 @@ export const deepSessions = pgTable(
     minutes: integer("minutes").notNull(),
     outcome: text("outcome").notNull(), // done | partial | not done
     focus_pct: integer("focus_pct"), // self-reported focus, 0-100; null until rated
+    notes: text("notes"), // free-form, edited in the session drawer
     started_at: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("deep_sessions_user_id_started_at_idx").on(t.user_id, t.started_at)],
@@ -71,4 +72,22 @@ export const userSettings = pgTable("user_settings", {
   default_minutes: integer("default_minutes").notNull().default(90),
   default_outcome: text("default_outcome").notNull().default("done"),
   default_focus: integer("default_focus"), // null: leave focus unrated
+});
+
+// Commands from the dashboard to the user's Mac. `deepwork agent` polls, claims and runs them.
+export const cliCommands = pgTable("cli_commands", {
+  id: uuid("id").primaryKey(),
+  user_id: uuid("user_id").notNull(),
+  kind: text("kind").notNull(), // start | stop
+  goal: text("goal"),
+  minutes: integer("minutes"),
+  created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  claimed_at: timestamp("claimed_at", { withTimezone: true }),
+});
+
+// Last time each user's agent checked in, so the dashboard knows whether + can reach a Mac.
+export const cliAgents = pgTable("cli_agents", {
+  user_id: uuid("user_id").primaryKey(),
+  host: text("host"),
+  seen_at: timestamp("seen_at", { withTimezone: true }).notNull(),
 });
