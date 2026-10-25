@@ -15,7 +15,7 @@ Through working deeply, we have the chance to do something thought impossible. I
 
 You 100% have some goal, some dream that it's time to be overly ambitious about. This scratch space is for thinking about that. Don't worry when 90 minutes didn't get you as much work as you would have liked. In my case I wanted to time travel and all I could do was this website...
 
-Before beginning though, I have two suggestions!
+Before beginning logging your time, I have two suggestions!
 Don't cheat yourself.
 Don't be afraid enough to cheat yourself. Even in competitions no one is monitoring you. This isn't a time card (at least one can hope).
 
