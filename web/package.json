@@ -1,6 +1,6 @@
 {
-  "name": "godeep-work",
-  "description": "godeep.work: deep work sessions with Google sign-in, on Neon Postgres, Auth and Realtime.",
+  "name": "deepwork-garden",
+  "description": "deepwork.garden: deep work sessions with Google sign-in, on Neon Postgres, Auth and Realtime.",
   "private": true,
   "scripts": {
     "build": "next build",

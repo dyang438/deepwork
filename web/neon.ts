@@ -4,7 +4,7 @@ export default defineConfig({
   // Declare your Neon services here
   preview: {
     realtime: {
-      allowedOrigins: ["http://localhost:3000", "https://godeep.work", "https://www.godeep.work"],
+      allowedOrigins: ["http://localhost:3000", "https://deepwork.garden", "https://www.deepwork.garden"],
     },
   },
   auth: true,

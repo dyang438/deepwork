@@ -1,10 +1,10 @@
-import Link from "next/link";
 import { connection } from "next/server";
 import { redirect } from "next/navigation";
 
 import { getUser } from "@/auth/server";
 import { myCompetitions } from "@/lib/competitions";
 
+import { CompList } from "./comp-list";
 import { CreateForm, JoinForm } from "./forms";
 
 export default async function CompetitionsPage() {
@@ -32,25 +32,15 @@ export default async function CompetitionsPage() {
               someone sent you.
             </p>
           ) : (
-            <ul className="m-0 list-none border-t border-line p-0">
-              {comps.map((c) => (
-                <li className="border-b border-line" key={c.id}>
-                  <Link
-                    className="flex items-center justify-between gap-4 py-4 hover:text-mint"
-                    href={`/app/competitions/${c.id}`}
-                  >
-                    <span className="text-lg">{c.name}</span>
-                    <span className="font-mono text-xs text-mist">
-                      {c.members} {c.members === 1 ? "MEMBER" : "MEMBERS"} ·{" "}
-                      {day(c.starts_at).toUpperCase()}
-                      {c.ends_at
-                        ? ` – ${day(c.ends_at).toUpperCase()}`
-                        : " ONWARD"}
-                    </span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
+            <CompList
+              comps={comps.map((c) => ({
+                id: c.id,
+                name: c.name,
+                meta: `${c.members} ${c.members === 1 ? "MEMBER" : "MEMBERS"} · ${day(c.starts_at).toUpperCase()}${
+                  c.ends_at ? ` – ${day(c.ends_at).toUpperCase()}` : " ONWARD"
+                }`,
+              }))}
+            />
           )}
         </div>
       </div>

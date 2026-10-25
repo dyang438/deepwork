@@ -519,9 +519,6 @@ export function SessionList({
             }}
             type="button"
           >
-            <kbd className="mr-2 rounded border border-line border-b-2 px-1.5 text-cream">
-              j
-            </kbd>
             History
           </button>
         </div>
@@ -529,9 +526,6 @@ export function SessionList({
         <div className="view-up" key="history">
           <h1 className="mt-0 mb-8 flex items-baseline justify-between text-5xl font-normal tracking-[-0.04em]">
             History
-            <span className="font-mono text-[11px] tracking-normal text-mist">
-              J / K · ENTER EDIT · D DELETE · ESC BACK
-            </span>
           </h1>
           {rows.length === 0 && <p className="text-mist">No sessions yet.</p>}
           {rows.length > 0 && (

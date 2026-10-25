@@ -1,4 +1,4 @@
-// godeep.work mark: a soft pink lotus with leaves on a veined lily pad. Also exported as src/app/icon.svg.
+// deepwork.garden mark: a soft pink lotus with leaves on a veined lily pad. Also exported as src/app/icon.svg.
 export function Logo({ className = "size-6" }: { className?: string }) {
   return (
     <svg

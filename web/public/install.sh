@@ -1,6 +1,6 @@
 #!/bin/sh
 # Installs (or updates) the deepwork CLI: https://github.com/dyang438/deepwork
-# Usage: curl -fsSL https://godeep.work/install.sh | sh
+# Usage: curl -fsSL https://deepwork.garden/install.sh | sh
 set -e
 DIR="${DEEPWORK_DIR:-$HOME/deepwork}"
 BIN="$HOME/.local/bin"

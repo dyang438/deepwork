@@ -40,7 +40,7 @@ export function JoinForm() {
       }}
     >
       <p className="eyebrow m-0 text-[11px]">Join with an invite</p>
-      <input aria-label="Invite link or code" className={input} onChange={(e) => setValue(e.target.value)} placeholder="godeep.work/join/…" required value={value} />
+      <input aria-label="Invite link or code" className={input} onChange={(e) => setValue(e.target.value)} placeholder="deepwork.garden/join/…" required value={value} />
       <button className={button} disabled={pending} type="submit">
         {pending ? "Joining…" : "Join"}
       </button>

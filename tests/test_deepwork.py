@@ -251,7 +251,7 @@ class TestStore(Base):
         self.assertIn("showing the local log", r.stderr)
         self.assertIn("offline", r.stdout)
 
-    def test_godeep_login_live_session_and_upload(self):
+    def test_web_login_live_session_and_upload(self):
         import http.server, threading
         calls = []
 
@@ -304,11 +304,11 @@ class TestStore(Base):
         put = [c for c in calls if c[:2] == ("PUT", "/api/cli/active")]
         self.assertEqual(put[0][3]["goal"], "web block")
         r = self.run_cli("off", stdin="")
-        self.assertIn("On your godeep.work dashboard.", r.stdout)
+        self.assertIn("On your deepwork.garden dashboard.", r.stdout)
         self.assertTrue(any(c[:2] == ("DELETE", "/api/cli/active") for c in calls))
         up = [c for c in calls if c[1] == "/api/cli/sessions"][-1][3]["sessions"]
         self.assertEqual((len(up), up[0]["goal"], up[0]["outcome"]), (1, "web block", "not done"))
-        self.assertEqual(self.run_cli("sync").stdout.strip(), "Synced 1 session(s) to godeep.work.")
+        self.assertEqual(self.run_cli("sync").stdout.strip(), "Synced 1 session(s) to deepwork.garden.")
         self.assertEqual(up[0]["id"], [c for c in calls if c[1] == "/api/cli/sessions"][-1][3]["sessions"][0]["id"])
 
         self.run_cli("logout")

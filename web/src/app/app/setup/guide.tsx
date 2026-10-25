@@ -6,7 +6,7 @@ import type { SetupStatus } from "@/lib/setup";
 
 import { setupStatus } from "./actions";
 
-const HIDE_KEY = "godeep-setup-hidden";
+const HIDE_KEY = "deepwork-setup-hidden";
 
 function Command({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -82,7 +82,7 @@ export function SetupGuide({ initial, page = false }: { initial: SetupStatus; pa
       <ol className="m-0 list-none p-0">
         <Step done={status.cli} n={1} title="Install the CLI">
           Needs macOS with git and python3 (both come with the Xcode command line tools).
-          <Command text="curl -fsSL https://godeep.work/install.sh | sh" />
+          <Command text="curl -fsSL https://deepwork.garden/install.sh | sh" />
         </Step>
         <Step done={status.cli} n={2} title="Connect it to this account">
           Your terminal shows a code; confirm it in the browser tab that opens.

@@ -6,11 +6,11 @@
   deepwork status         show the current session
   deepwork stats          deep hours today, this week, per goal (--all includes everyone in the store)
   deepwork capture "..."  append a stray thought to the capture file
-  deepwork sync           push the local log to godeep.work and/or the database (database_url in settings)
-  deepwork login [url]    connect this terminal to your godeep.work account (default https://godeep.work)
+  deepwork sync           push the local log to deepwork.garden and/or the database (database_url in settings)
+  deepwork login [url]    connect this terminal to your deepwork.garden account (default https://deepwork.garden)
   deepwork logout         forget that connection
   deepwork whoami         show which account this terminal is connected to
-  deepwork agent install  start blocks from godeep.work: runs a small agent at login (uninstall / status too)
+  deepwork agent install  start blocks from deepwork.garden: runs a small agent at login (uninstall / status too)
   deepwork questions      edit your settings in $EDITOR
   deepwork config         print your settings
 Flags: -y (skip questions), -g "goal", -d (return right away instead of counting down here), --dry-run (no apps quit, no DND, isolated state in ~/.deepwork-dryrun).
@@ -40,7 +40,7 @@ REQUIT_EVERY = 3
 SAMPLE_EVERY = float(os.environ.get("DEEPWORK_SAMPLE_EVERY", "10"))
 ACTIVE_WITHIN = 60  # a sample is active if there was keyboard or mouse input in the last 60 s
 CHROME = "Google Chrome"
-DEFAULT_SERVER = "https://godeep.work"
+DEFAULT_SERVER = "https://deepwork.garden"
 
 # Settings live in ~/.deepwork/config.json. A question set to false (or deleted) is skipped; a string replaces
 # its wording; "custom" adds your own questions (answers are logged).
@@ -183,10 +183,10 @@ class Cfg:
             os.makedirs(os.path.dirname(p), exist_ok=True)
 
 
-# ---------- godeep.work: sign in once, then sessions start and land on the web dashboard ----------
+# ---------- deepwork.garden: sign in once, then sessions start and land on the web dashboard ----------
 
 class Web:
-    """Talks to godeep.work with the token from `deepwork login`. Every call is best effort: the local log is
+    """Talks to deepwork.garden with the token from `deepwork login`. Every call is best effort: the local log is
     the source of truth, and the whole log is re-sent (idempotently) on the next sync."""
 
     def __init__(self, cfg):
@@ -212,7 +212,7 @@ class Web:
                 return r.status, json.loads(r.read() or b"{}")
         except urllib.error.HTTPError as e:
             if e.code == 401 and token:
-                raise RuntimeError("godeep.work no longer accepts this terminal; run: deepwork login")
+                raise RuntimeError("deepwork.garden no longer accepts this terminal; run: deepwork login")
             return e.code, json.loads(e.read() or b"{}")
 
     def active(self, s):
@@ -230,7 +230,7 @@ class Web:
                 for r in records if r.get("kind", "deep") == "deep" and r.get("start")]
         code, body = self.call("POST", "/api/cli/sessions", {"sessions": rows}, timeout=20)
         if code != 200:
-            raise RuntimeError("godeep.work refused the upload (%s): %s" % (code, body.get("error")))
+            raise RuntimeError("deepwork.garden refused the upload (%s): %s" % (code, body.get("error")))
         return body["synced"]
 
 
@@ -263,15 +263,15 @@ def login(cfg, server):
     if cfg.store.local():
         print("Uploaded %d past session(s)." % web.sync(cfg.store.local()))
     if not os.path.exists(AGENT_PLIST):
-        print("Next: deepwork agent install, so + on godeep.work starts blocks on this Mac.")
+        print("Next: deepwork agent install, so + on deepwork.garden starts blocks on this Mac.")
 
 
-AGENT_LABEL = "work.godeep.deepwork-agent"
+AGENT_LABEL = "garden.deepwork.agent"
 AGENT_PLIST = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % AGENT_LABEL)
 
 
 def agent(cfg):
-    """Long-running: poll godeep.work for start/stop commands from the dashboard and run them on this Mac."""
+    """Long-running: poll deepwork.garden for start/stop commands from the dashboard and run them on this Mac."""
     every = float(os.environ.get("DEEPWORK_AGENT_EVERY", "3"))
     me = [sys.executable, os.path.realpath(__file__)] + (["--dry-run"] if cfg.dry else [])
     print("%s agent up on %s" % (iso(now()), socket.gethostname()), flush=True)
@@ -326,7 +326,7 @@ def agent_ctl(cfg, action):
         r = subprocess.run(["launchctl", "bootstrap", "gui/" + uid, AGENT_PLIST], capture_output=True, text=True)
         if r.returncode != 0:
             sys.exit("launchctl couldn't start the agent: %s" % r.stderr.strip())
-        return print("Agent installed: + on godeep.work now starts blocks on this Mac. Log: %s" % log)
+        return print("Agent installed: + on deepwork.garden now starts blocks on this Mac. Log: %s" % log)
     if action == "uninstall":
         subprocess.run(["launchctl", "bootout", "gui/%s/%s" % (uid, AGENT_LABEL)], capture_output=True)
         rm(AGENT_PLIST)
@@ -372,9 +372,9 @@ class Store:
         if self.web.enabled:
             try:
                 self.web.sync(self.local())
-                notes.append("On your godeep.work dashboard.")
+                notes.append("On your deepwork.garden dashboard.")
             except Exception as e:
-                notes.append("godeep.work sync failed (%s); saved locally, retried on the next sync." % e)
+                notes.append("deepwork.garden sync failed (%s); saved locally, retried on the next sync." % e)
         return "\n".join(notes)
 
     def records(self):
@@ -558,7 +558,7 @@ def claim_and_restore(cfg, ended_by):
         try:
             cfg.web.clear()
         except Exception as e:
-            sys.stderr.write("deepwork: couldn't clear the live session on godeep.work: %s\n" % e)
+            sys.stderr.write("deepwork: couldn't clear the live session on deepwork.garden: %s\n" % e)
     act(cfg, "shortcut", SHORTCUT_OFF)
     for a in s.get("apps_running", cfg.apps):
         act(cfg, "open", a)
@@ -920,7 +920,7 @@ def watchdog(cfg):
         try:
             cfg.web.active(s0)
         except Exception as e:
-            print("%s couldn't show the session on godeep.work: %s" % (iso(now()), e), flush=True)
+            print("%s couldn't show the session on deepwork.garden: %s" % (iso(now()), e), flush=True)
     while True:
         s = read_json(cfg.session)
         if not s:
@@ -929,7 +929,7 @@ def watchdog(cfg):
             if claim_and_restore(cfg, "timer"):
                 if s.get("from_web"):
                     shutdown(cfg, True)
-                    act(cfg, "notify", "Time is up: %s. Rate it on godeep.work." % s.get("goal"))
+                    act(cfg, "notify", "Time is up: %s. Rate it on deepwork.garden." % s.get("goal"))
                 elif pid_alive(s.get("fg_pid")):  # the terminal that started it runs the shutdown itself
                     act(cfg, "notify", "Time is up: %s." % s.get("goal"))
                 else:
@@ -995,7 +995,7 @@ def main(argv):
             if cfg.database_url:
                 print("Synced %d session(s) to the database." % cfg.store.sync())
             if cfg.web.enabled:
-                print("Synced %d session(s) to godeep.work." % cfg.web.sync(cfg.store.local()))
+                print("Synced %d session(s) to deepwork.garden." % cfg.web.sync(cfg.store.local()))
             return
         except Exception as e:
             sys.exit("Sync failed: %s" % e)
@@ -1005,7 +1005,7 @@ def main(argv):
         return agent_ctl(cfg, rest[1] if len(rest) > 1 else "run")
     if cmd == "logout":
         rm(cfg.credentials)
-        return print("Disconnected this terminal from godeep.work.")
+        return print("Disconnected this terminal from deepwork.garden.")
     if cmd == "whoami":
         if not cfg.web.enabled:
             return print("Not connected. Run: deepwork login")
