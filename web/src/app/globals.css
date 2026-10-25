@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+/* Neon's structure (near-black, hairlines, Inter + Geist Mono) in the palette of Van Gogh's Roses (1890). */
+@theme {
+  --color-ink: #070b09; /* page: black with a trace of leaf green */
+  --color-panel: #0d1411;
+  --color-line: rgb(232 240 228 / 0.1); /* hairline borders */
+  --color-cream: #f2efe2; /* petal white: primary text and pill buttons */
+  --color-mist: #a9b8ad; /* secondary text */
+  --color-mint: #8fe3bb; /* the painting's background green: the accent */
+  --color-leaf: #2f6b45;
+  --color-ochre: #c9a96e; /* the vase */
+  --color-rose: #e7b7ad; /* the faint pink in the petals */
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-ink);
+  color: var(--color-cream);
+  font-family: var(--font-sans);
+}
+
+/* Neon's mono eyebrow label. */
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-mist);
+}
