@@ -15,6 +15,7 @@ isolated state in ~/.deepwork-dryrun, nothing written to the real log).
 """
 import collections
 import datetime as dt
+import fcntl
 import http.server
 import json
 import os
@@ -380,11 +381,6 @@ def _shutdown(cfg, assume_yes, s):
     if s.get("kind") == "baseline":
         assume_yes = True
     ended = s.get("ended", now())
-    counts = {}
-    worker = None
-    if s.get("kind", "deep") == "deep":
-        worker = threading.Thread(target=count_tasks, args=(cfg, s, ended, counts), daemon=True)
-        worker.start()  # runs while the questions are answered
     self_count = None
     outcome, done, loops, tomorrow, answers = "unrecorded", "", [], "", dict(s.get("answers") or {})
     if not assume_yes:
@@ -411,8 +407,7 @@ def _shutdown(cfg, assume_yes, s):
             answers[c] = ask(c.rstrip() + " ")
     for line in loops:
         append_capture(cfg, line, "open loop")
-    if worker:
-        worker.join(150)
+    git = count_commits(cfg, s, ended) if s.get("kind", "deep") == "deep" else None
     breaks = [[b["start"], b["end"]] for b in s.get("breaks", []) if b["start"] < ended]
     rec = {
         "who": s.get("who", cfg.who), "start": iso(s.get("start", ended)), "end": iso(ended),
@@ -424,16 +419,19 @@ def _shutdown(cfg, assume_yes, s):
                               breaks=breaks) if s.get("samples_path") else None,
         "breaks": [{"start": iso(b0), "end": iso(min(b1, ended)), "minutes": round((min(b1, ended) - b0) / 60, 1)}
                    for b0, b1 in breaks],
-        "tasks": {"self": self_count, "backlog_closed": counts.get("backlog"), "git_commits": counts.get("git")},
+        "tasks": {"self": self_count, "backlog_closed": None, "git_commits": git},
     }
     rec["tasks"]["used"] = tasks_used(rec["tasks"])
     with open(cfg.log, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
         f.write(json.dumps(rec) + "\n")
     if rec["activity"]:
         print(session_line(rec))
         print(experimental_line(rec))
-    if rec["kind"] == "deep" and cfg.share:
-        print(share_row(cfg, rec))
+    if rec["kind"] == "deep" and (cfg.share or (cfg.backlog and s.get("samples_path"))):
+        # The backlog pull takes about a minute; never make the next session wait for it.
+        spawn(cfg, "_finish", rec["start"], s.get("samples_path") or "")
+        print("Backlog count and scoreboard share continue in the background.")
     if rec["kind"] == "baseline":
         return print("Baseline logged (%.0f min)." % rec["minutes"])
     print("Logged %.0f min. Shutdown complete." % rec["minutes"])
@@ -758,13 +756,38 @@ def before_path(s):
     return s["samples_path"].replace(".jsonl", ".backlog-before.json")
 
 
-def count_tasks(cfg, s, ended, out):
+def count_commits(cfg, s, ended):
     try:
-        out["git"] = git_commits(cfg.git_root, os.environ.get("DEEPWORK_GIT_AUTHOR", cfg.who), s["start"], ended)
+        return git_commits(cfg.git_root, os.environ.get("DEEPWORK_GIT_AUTHOR", cfg.who), s["start"], ended)
     except Exception:
-        out["git"] = None
-    if cfg.backlog and s.get("samples_path"):
-        out["backlog"] = backlog_closed(read_json(before_path(s)), backlog_snapshot(cfg), s.get("who", cfg.who))
+        return None
+
+
+def finish(cfg, start, samples_path):
+    """Detached after shutdown: backlog closures into the logged record, then the scoreboard row."""
+    rec = next((r for r in load_log(cfg.log) if r.get("start") == start and r.get("kind", "deep") == "deep"), None)
+    if not rec:
+        return
+    if cfg.backlog and samples_path:
+        before = read_json(before_path({"samples_path": samples_path}))
+        rec["tasks"]["backlog_closed"] = backlog_closed(before, backlog_snapshot(cfg), rec.get("who", cfg.who))
+        rec["tasks"]["used"] = tasks_used(rec["tasks"])
+        with open(cfg.log, "r+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            lines = f.readlines()
+            for i, line in enumerate(lines):
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get("start") == start and r.get("kind", "deep") == "deep":
+                    lines[i] = json.dumps(rec) + "\n"
+            f.seek(0)
+            f.writelines(lines)
+            f.truncate()
+    if cfg.share:
+        print(share_row(cfg, rec), flush=True)
+    print("%s finish %s done" % (iso(now()), start), flush=True)
 
 
 # ---------- shared scoreboard (kb page deepwork/scoreboard) ----------
@@ -906,7 +929,11 @@ def clean_domain(d):
 # ---------- watchdog ----------
 
 def spawn_watchdog(cfg):
-    """Double fork + setsid so the watchdog survives the terminal closing. Returns its pid."""
+    return spawn(cfg, "_watchdog")
+
+
+def spawn(cfg, *cmd):
+    """Double fork + setsid so the child survives the terminal closing. Returns its pid."""
     r, w = os.pipe()
     pid = os.fork()
     if pid == 0:
@@ -922,7 +949,7 @@ def spawn_watchdog(cfg):
         os.dup2(nul, 0)
         os.dup2(fd, 1)
         os.dup2(fd, 2)
-        args = [sys.executable, os.path.realpath(__file__), "_watchdog"] + (["--dry-run"] if cfg.dry else [])
+        args = [sys.executable, os.path.realpath(__file__), *cmd] + (["--dry-run"] if cfg.dry else [])
         os.execv(sys.executable, args)
     os.close(w)
     data = os.read(r, 32)
@@ -1070,6 +1097,8 @@ def main(argv):
     cmd = rest[0] if rest else str(DEFAULT_MIN)
     if cmd == "_watchdog":
         return watchdog(cfg)
+    if cmd == "_finish":
+        return finish(cfg, rest[1], rest[2])
     if cmd == "off":
         return off(cfg, assume_yes)
     if cmd == "status":

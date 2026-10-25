@@ -40,6 +40,15 @@ class Base(unittest.TestCase):
     def path(self, *p):
         return os.path.join(self.tmp, *p)
 
+    def wait_finish(self, n):
+        """Wait for the nth detached post-shutdown step; return its watchdog.log output."""
+        for _ in range(100):
+            log = open(self.path("state", "watchdog.log")).read()
+            if log.count(" done\n") >= n:
+                return log
+            time.sleep(0.1)
+        self.fail("finish step never completed")
+
     def tearDown(self):
         s = dw.read_json(self.path("state", "session.json"))
         if s and s.get("watchdog_pid"):
@@ -295,12 +304,14 @@ class TestExperimental(Base):
         subprocess.run(["git", "-C", repo, "commit", "-q", "--allow-empty", "-m", "d"], env=genv, check=True)
         time.sleep(1.1)
         r = self.run_cli("off", "-y")
+        self.assertIn("continue in the background", r.stdout)
+        log = self.wait_finish(1)
         rec = json.loads(open(self.env["DEEPWORK_LOG"]).read().strip())
         self.assertEqual(rec["tasks"]["backlog_closed"], 2)  # bl-1 and new bl-4; not David's, not already done
         self.assertEqual(rec["tasks"]["git_commits"], 2)
         self.assertEqual(rec["tasks"]["used"], {"n": 2, "source": "backlog"})  # commits never count
         self.assertIn("commits (mostly agents) 2", self.run_cli("stats").stdout)
-        self.assertIn("Shared 1 row", r.stdout)
+        self.assertIn("Shared 1 row", log)
         page = open(os.path.join(kb, "deepwork", "scoreboard.md")).read()
         self.assertIn("| who | date | minutes | goal |", page)
         row = page.strip().splitlines()[-1]
@@ -313,12 +324,12 @@ class TestExperimental(Base):
         open(os.path.join(kb, "FAIL"), "w").close()
         self.env["DEEPWORK_BACKLOG"] = "0"
         self.run_cli("10", "-y", "-g", "second")
-        r = self.run_cli("off", "-y")
-        self.assertIn("queued 1 row", r.stdout)
+        self.run_cli("off", "-y")
+        self.assertIn("queued 1 row", self.wait_finish(2))
         os.remove(os.path.join(kb, "FAIL"))
         self.run_cli("10", "-y", "-g", "third")
-        r = self.run_cli("off", "-y")
-        self.assertIn("Shared 2 row", r.stdout)
+        self.run_cli("off", "-y")
+        self.assertIn("Shared 2 row", self.wait_finish(3))
         rows = [l for l in open(os.path.join(kb, "deepwork", "scoreboard.md")) if l.startswith("| tester")]
         self.assertEqual(len(rows), 3)
         self.assertEqual(open(os.path.join(kb, "deepwork", "scoreboard.md.rev")).read(), "2")
