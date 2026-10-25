@@ -25,7 +25,7 @@ export function ConfirmDelete({ goal, onConfirm, onCancel }: { goal: string; onC
         aria-modal="true"
         className="pop-in w-full max-w-sm rounded-2xl border border-line bg-panel p-6"
         onClick={(e) => e.stopPropagation()}
-        role="alertdialog"
+        role="alertdialog" data-dw-dialog=""
       >
         <p className="m-0 text-lg">Are you sure you want to delete this session?</p>
         <p className="m-0 mt-2 truncate text-sm text-mist">{goal}</p>

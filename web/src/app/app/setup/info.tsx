@@ -36,7 +36,7 @@ export function SetupInfo({ initial }: { initial: SetupStatus }) {
             aria-label="Setup"
             className="pop-in max-h-[88vh] w-full max-w-xl overflow-y-auto rounded-2xl border border-line bg-panel p-7"
             onClick={(e) => e.stopPropagation()}
-            role="dialog"
+            role="dialog" data-dw-dialog=""
           >
             <SetupGuide initial={initial} page />
           </div>

@@ -60,7 +60,7 @@ export function SettingsGear({ defaults }: { defaults: Defaults }) {
                 router.refresh(); // the composer picks up the new defaults
               });
             }}
-            role="dialog"
+            role="dialog" data-dw-dialog=""
           >
             <p className="eyebrow m-0 mb-1 text-[11px]">Settings</p>
             <h2 className="mt-0 mb-6 text-2xl font-normal tracking-[-0.03em]">Defaults</h2>

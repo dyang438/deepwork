@@ -17,7 +17,7 @@ export function Tabs() {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
       if (e.key !== "n" || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || document.querySelector('[role="dialog"], [role="alertdialog"]')) return;
+      if (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || document.querySelector("[data-dw-dialog]")) return;
       e.preventDefault();
       router.push(TABS[0].active(window.location.pathname) ? TABS[1].href : TABS[0].href); // the live URL, never a stale render's
     };
@@ -31,6 +31,7 @@ export function Tabs() {
           aria-current={t.active(path) ? "page" : undefined}
           className={`rounded-full px-4 py-1.5 text-sm ${t.active(path) ? "bg-cream text-ink" : "text-mist hover:text-cream"}`}
           href={t.href}
+          prefetch
           key={t.href}
         >
           {t.label}

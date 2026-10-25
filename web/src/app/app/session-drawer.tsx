@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 
 import type { SessionRow } from "@/lib/sessions";
 
@@ -16,16 +16,9 @@ const FIELDS = [
   "minutes",
   "outcome",
   "focus",
-  "started",
   "notes",
 ] as const;
 type Field = (typeof FIELDS)[number];
-
-// "2026-10-25T14:30" in local time, for <input type="datetime-local">.
-const toLocalInput = (d: Date) =>
-  new Date(d.getTime() - d.getTimezoneOffset() * 60_000)
-    .toISOString()
-    .slice(0, 16);
 
 const changed = (a: SessionEdit, b: SessionEdit) =>
   a.goal !== b.goal ||
@@ -38,7 +31,7 @@ const changed = (a: SessionEdit, b: SessionEdit) =>
 const cycle = <T,>(xs: readonly T[], x: T, step: number) =>
   xs[(xs.indexOf(x) + step + xs.length) % xs.length];
 
-// Vim-style: j / k move between fields, Enter or i edits one, Esc leaves the field, Esc again closes.
+// Arrow keys move between fields, Enter edits one, Esc leaves the field, Esc again closes.
 // Closing (Esc, x, a click outside) or Cmd+Enter saves whatever changed.
 export function SessionDrawer({
   row,
@@ -54,6 +47,8 @@ export function SessionDrawer({
   const inputs = useRef<
     Partial<Record<Field, HTMLInputElement | HTMLTextAreaElement | null>>
   >({});
+  const menuId = useId();
+  const menus = useRef<Partial<Record<"outcome" | "focus", HTMLDivElement | null>>>({});
 
   const set = <K extends keyof SessionEdit>(k: K, v: SessionEdit[K]) =>
     setDraft((d) => ({ ...d, [k]: v }));
@@ -110,14 +105,38 @@ export function SessionDrawer({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Editing a text field focuses its input; leaving edit mode takes focus away so j / k move again.
+  // Editing a text field focuses its input; leaving edit mode takes focus away so arrows move again.
   useEffect(() => {
     const el = inputs.current[field];
     if (editing && el) {
       el.focus();
       if (el instanceof HTMLTextAreaElement || el.type === "text")
         el.setSelectionRange(el.value.length, el.value.length);
-    } else (document.activeElement as HTMLElement | null)?.blur();
+    } else if (editing && (field === "outcome" || field === "focus")) {
+      menus.current[field]?.focus();
+    } else {
+      const active = document.activeElement;
+      if (
+        Object.values(inputs.current).some((input) => input === active) ||
+        Object.values(menus.current).some((menu) => menu === active)
+      ) (active as HTMLElement | null)?.blur();
+    }
+  }, [editing, field]);
+
+  useEffect(() => {
+    if (!editing || (field !== "outcome" && field !== "focus")) return;
+    menus.current[field]?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [editing, field, draft.outcome, draft.focus_pct]);
+
+  useEffect(() => {
+    if (!editing || (field !== "outcome" && field !== "focus")) return;
+    const menu = menus.current[field];
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Node && !menu?.parentElement?.contains(event.target))
+        setEditing(false);
+    };
+    document.addEventListener("pointerdown", dismiss);
+    return () => document.removeEventListener("pointerdown", dismiss);
   }, [editing, field]);
 
   const textInput =
@@ -151,14 +170,74 @@ export function SessionDrawer({
     );
   };
 
-  const enumValue = (text: string, isEditing: boolean) => (
-    <span className="flex items-center justify-between gap-3">
-      <span className="text-cream">{text}</span>
-      {isEditing && (
-        <span className="font-mono text-[11px] text-mist">j / k</span>
-      )}
-    </span>
-  );
+  const enumValue = (name: "outcome" | "focus") => {
+    const isEditing = editing && field === name;
+    const options = name === "outcome"
+      ? OUTCOMES.map((value) => ({
+          label: value[0].toUpperCase() + value.slice(1),
+          selected: draft.outcome === value,
+          choose: () => set("outcome", value),
+        }))
+      : FOCUS.map((value) => ({
+          label: value == null ? "Unrated" : `${value}%`,
+          selected: draft.focus_pct === value,
+          choose: () => set("focus_pct", value),
+        }));
+    const selected = options.findIndex((option) => option.selected);
+    const id = `${menuId}-${name}`;
+    return (
+      <div className="relative">
+        <button
+          aria-controls={isEditing ? id : undefined}
+          aria-expanded={isEditing}
+          aria-haspopup="listbox"
+          className="flex w-full cursor-pointer items-center justify-between gap-3 bg-transparent p-0 text-left text-cream outline-none"
+          id={`${id}-trigger`}
+          onClick={(event) => {
+            event.stopPropagation();
+            setCursor(FIELDS.indexOf(name));
+            setEditing(!isEditing);
+          }}
+          onFocus={() => setCursor(FIELDS.indexOf(name))}
+          type="button"
+        >
+          <span>{name === "focus" && draft.focus_pct == null ? "–" : options[selected]?.label}</span>
+          <span aria-hidden="true" className="font-mono text-[11px] text-mist">{isEditing ? "↑ / ↓" : "⌄"}</span>
+        </button>
+        {isEditing && (
+          <div
+            aria-activedescendant={`${id}-${selected}`}
+            aria-label={name === "outcome" ? "Outcome" : "Focus"}
+            className="pop-in absolute inset-x-0 top-full z-10 mt-2 max-h-[min(22rem,45dvh)] overflow-y-auto rounded-lg border border-line bg-ink p-1 shadow-[0_12px_30px_rgb(0_0_0/0.35)] outline-none"
+            id={id}
+            onClick={(event) => event.stopPropagation()}
+            ref={(element) => void (menus.current[name] = element)}
+            role="listbox"
+            tabIndex={-1}
+          >
+            {options.map((option, index) => (
+              <button
+                aria-selected={option.selected}
+                className={`flex w-full cursor-pointer items-center justify-between gap-3 rounded px-3 py-1.5 text-left text-sm text-cream hover:bg-cream/[0.05] ${option.selected ? "bg-cream/[0.05]" : ""}`}
+                id={`${id}-${index}`}
+                key={option.label}
+                onClick={() => {
+                  option.choose();
+                  setEditing(false);
+                }}
+                role="option"
+                tabIndex={-1}
+                type="button"
+              >
+                {option.label}
+                {option.selected && <span aria-hidden="true" className="text-mint">✓</span>}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="fixed inset-0 z-30" role="presentation">
@@ -172,7 +251,7 @@ export function SessionDrawer({
       <aside
         aria-label="Edit session"
         className="drawer absolute inset-y-0 right-0 flex w-full flex-col border-l border-line bg-panel px-7 pt-6 pb-5 sm:w-[460px]"
-        role="dialog"
+        role="dialog" data-dw-dialog=""
       >
         <div className="mb-6 flex items-center justify-between">
           <p className="eyebrow m-0 text-[11px]">Session</p>
@@ -235,51 +314,25 @@ export function SessionDrawer({
         {line(
           2,
           "Outcome",
-          <>
-            {enumValue(
-              draft.outcome[0].toUpperCase() + draft.outcome.slice(1),
-              editing && field === "outcome",
-            )}
-          </>,
+          enumValue("outcome"),
         )}
         {line(
           3,
           "Focus",
-          <>
-            {enumValue(
-              draft.focus_pct == null ? "–" : `${draft.focus_pct}%`,
-              editing && field === "focus",
-            )}
-          </>,
+          enumValue("focus"),
         )}
-        {line(
-          4,
-          "Started",
-          <>
-            {editing && field === "started" ? (
-              <input
-                aria-label="Started"
-                className={textInput}
-                onChange={(e) =>
-                  e.target.value && set("started_at", new Date(e.target.value))
-                }
-                ref={(el) => void (inputs.current.started = el)}
-                type="datetime-local"
-                value={toLocalInput(draft.started_at)}
-              />
-            ) : (
-              <span className="text-cream tabular-nums">
-                {draft.started_at.toLocaleString([], {
-                  dateStyle: "medium",
-                  timeStyle: "short",
-                })}
-              </span>
-            )}
-          </>,
-        )}
+        <div className="grid grid-cols-[5.5rem_1fr] items-baseline gap-4 py-3">
+          <span className="font-mono text-[11px] uppercase text-mist">Started</span>
+          <div className="border-b border-transparent pb-1 text-cream tabular-nums">
+            {draft.started_at.toLocaleString([], {
+              dateStyle: "medium",
+              timeStyle: "short",
+            })}
+          </div>
+        </div>
         <div className="flex min-h-0 flex-1 flex-col [&>div]:flex-1 [&>div>div]:h-full">
           {line(
-            5,
+            4,
             "Notes",
             <>
               {editing && field === "notes" ? (
@@ -303,7 +356,7 @@ export function SessionDrawer({
         <p className="eyebrow m-0 mt-4 text-[10px]">
           {editing
             ? "Esc done · ⌘↵ save"
-            : "j / k move · enter edit · esc close · ⌘↵ save"}
+            : "↑ / ↓ move · enter edit · esc close · ⌘↵ save"}
         </p>
       </aside>
     </div>

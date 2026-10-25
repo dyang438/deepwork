@@ -29,6 +29,7 @@ import {
   updateSession,
   type WriteResult,
 } from "./actions";
+import { CalendarView } from "./calendar-view";
 import { ConfirmDelete } from "./confirm-delete";
 import { SessionDrawer, type SessionEdit } from "./session-drawer";
 
@@ -182,19 +183,23 @@ export function SessionList({
     });
   }
 
-  // Keyboard, outside text fields: + opens the composer, h / l switch today/week, and j / k move through sessions.
+  // Keyboard, outside text fields: + opens the composer, h / l switch today/week, and arrows move through sessions.
   const [sel, setSel] = useState(-1);
   const [editing, setEditing] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<OptimisticRow | null>(null); // the delete dialog
-  const [history, setHistory] = useState(false); // j swaps the overview for the session history
+  // Which view the Personal tab shows: the overview, the session history (h / Down), or the calendar (c).
+  const [view, setView] = useState<"overview" | "history" | "calendar">("overview");
+  const history = view === "history";
+  const setHistory = (on: boolean) => setView(on ? "history" : "overview");
   const keys = useRef({
     rows: [] as readonly OptimisticRow[],
     sel,
     composing,
     editing,
     history,
+    view,
   });
-  keys.current = { rows, sel, composing, editing, history };
+  keys.current = { rows, sel, composing, editing, history, view };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
@@ -204,28 +209,35 @@ export function SessionList({
       if (
         t.isContentEditable ||
         ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) ||
-        document.querySelector('[role="dialog"]')
+        document.querySelector("[data-dw-dialog]")
       )
         return;
       if (e.key === "+" || e.key === "=") {
         setHistory(false); // the composer lives on the overview
         setComposing(true);
       }
-      else if (e.key === "j" && !k.history) {
+      else if (e.key === "c") {
+        setView(k.view === "calendar" ? "overview" : "calendar");
+        setSel(-1);
+      } else if (e.key === "Escape" && k.view === "calendar") setView("overview");
+      else if (e.key === "h" && !k.history) {
+        setView("history");
+        setSel(k.rows.length ? 0 : -1);
+      } else if ((e.key === "ArrowDown" || e.key === "j") && !k.history && k.view !== "calendar") {
         setHistory(true);
         setSel(k.rows.length ? 0 : -1);
-      } else if (e.key === "j") setSel(Math.min(k.sel + 1, k.rows.length - 1));
-      else if (e.key === "k" && k.history && k.sel <= 0) {
-        setHistory(false); // k past the top goes back to the overview
+      } else if (e.key === "ArrowDown" || e.key === "j") setSel(Math.min(k.sel + 1, k.rows.length - 1));
+      else if ((e.key === "ArrowUp" || e.key === "k") && k.history && k.sel <= 0) {
+        setHistory(false); // Up past the top goes back to the overview.
         setSel(-1);
-      } else if (e.key === "k") setSel(Math.max(k.sel - 1, 0));
+      } else if ((e.key === "ArrowUp" || e.key === "k") && k.history) setSel(Math.max(k.sel - 1, 0));
       else if (e.key === "Escape" && k.history) {
         setHistory(false);
         setSel(-1);
       } else if (e.key === "Enter" && k.rows[k.sel])
         setEditing(k.rows[k.sel].id);
       else if (e.key === "d" && k.rows[k.sel]) setConfirming(k.rows[k.sel]);
-      else if ((e.key === "h" || e.key === "t") && !k.history) setRange("today");
+      else if (e.key === "t" && !k.history) setRange("today");
       else if ((e.key === "l" || e.key === "w") && !k.history) setRange("week");
       else return;
       e.preventDefault();
@@ -262,6 +274,7 @@ export function SessionList({
 
   const [range, setRange] = useState<"today" | "week">("today");
   const week = useMemo(() => {
+    if (clockNow === null) return null; // server render: the server's time zone isn't yours, so wait for the browser
     const since = range === "week" ? weekStart() : new Date(new Date().setHours(0, 0, 0, 0));
     const mine = rows.filter((r) => r.started_at >= since);
     return {
@@ -269,7 +282,7 @@ export function SessionList({
       count: mine.length,
       done: mine.filter((r) => r.outcome === "done").length,
     };
-  }, [rows, range]);
+  }, [rows, range, clockNow === null]);
 
   function mutate(
     action: OptimisticAction,
@@ -343,7 +356,12 @@ export function SessionList({
 
   return (
     <section>
-      {!history ? (
+      {view === "calendar" ? (
+        <div className="view-up" key="calendar">
+          <h1 className="mt-0 mb-8 text-5xl font-normal tracking-[-0.04em]">Calendar</h1>
+          <CalendarView onOpen={(id) => setEditing(id)} rows={rows} />
+        </div>
+      ) : !history ? (
         <div className="view-down" key="overview">
           <h1 className="mt-0 mb-10 text-5xl font-normal tracking-[-0.04em]">
             Your deep work
@@ -363,9 +381,9 @@ export function SessionList({
           </div>
           <dl className="mb-10 grid grid-cols-3 overflow-hidden rounded-2xl border border-line">
             {[
-              [range === "today" ? "Deep hours today" : "Deep hours this week", week.hours.toFixed(1)],
-              [range === "today" ? "Sessions today" : "Sessions this week", String(week.count)],
-              ["Goals hit", week.count ? `${week.done} of ${week.count}` : "–"],
+              [range === "today" ? "Deep hours today" : "Deep hours this week", week ? week.hours.toFixed(1) : "–"],
+              [range === "today" ? "Sessions today" : "Sessions this week", week ? String(week.count) : "–"],
+              ["Goals hit", week?.count ? `${week.done} of ${week.count}` : "–"],
             ].map(([label, value], i) => (
               <div
                 key={label}
@@ -477,31 +495,13 @@ export function SessionList({
               fallback={
                 <button
                   aria-label={macOnline ? "Start a block" : "Log a session"}
-                  className="group flex w-full cursor-pointer items-center justify-between gap-4 rounded-xl border border-line bg-panel/55 p-4 text-left transition hover:border-mint/40 hover:bg-panel/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-mint"
+                  className="group flex h-10 w-full cursor-pointer items-center gap-4 bg-transparent p-0 text-cream/80 transition hover:text-mint focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-mint"
                   onClick={() => setComposing(true)}
                   type="button"
                 >
-                  <span className="flex min-w-0 items-center gap-4">
-                    <span aria-hidden="true" className="flex size-11 shrink-0 items-center justify-center rounded-lg border border-mint/20 bg-mint/[0.07] font-mono text-2xl text-mint transition group-hover:bg-mint/[0.12] group-hover:text-cream">
-                      +
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block text-sm text-cream">
-                        {macOnline ? "Start a block" : "Log a session"}
-                      </span>
-                      <span className="mt-1 block text-xs text-mist">
-                        {macOnline
-                          ? "Choose a goal and make space for it."
-                          : "Capture what you worked on."}
-                      </span>
-                    </span>
-                  </span>
-                  <span className="flex shrink-0 items-center gap-2 font-mono text-[10px] uppercase tracking-wide text-mist/70">
-                    <span className="hidden sm:inline">Press</span>
-                    <kbd className="flex h-7 min-w-7 items-center justify-center rounded-md border border-line border-b-2 bg-ink px-2 text-xs text-cream transition group-hover:border-mint/40">
-                      +
-                    </kbd>
-                  </span>
+                  <span aria-hidden="true" className="h-px flex-1 bg-line transition group-hover:bg-mint/25" />
+                  <span aria-hidden="true" className="font-mono text-2xl leading-none">+</span>
+                  <span aria-hidden="true" className="h-px flex-1 bg-line transition group-hover:bg-mint/25" />
                 </button>
               }
               initial={active.rows}
@@ -541,19 +541,28 @@ export function SessionList({
             </button>
           )}
 
-          <button
-            className="mt-16 cursor-pointer bg-transparent p-0 font-mono text-[11px] uppercase text-mist/70 hover:text-cream"
-            onClick={() => {
-              setHistory(true);
-              setSel(rows.length ? 0 : -1);
-            }}
-            type="button"
-          >
-            History
-          </button>
+          <div className="mt-16 flex gap-6 font-mono text-[11px] uppercase">
+            <button
+              className="cursor-pointer bg-transparent p-0 text-mist/70 hover:text-cream"
+              onClick={() => {
+                setHistory(true);
+                setSel(rows.length ? 0 : -1);
+              }}
+              type="button"
+            >
+              History
+            </button>
+            <button
+              className="cursor-pointer bg-transparent p-0 text-mist/70 hover:text-cream"
+              onClick={() => setView("calendar")}
+              type="button"
+            >
+              Calendar
+            </button>
+          </div>
         </div>
       ) : (
-        <div className="view-up" key="history">
+        <div key="history">
           <h1 className="mt-0 mb-8 flex items-baseline justify-between text-5xl font-normal tracking-[-0.04em]">
             History
           </h1>
@@ -566,7 +575,7 @@ export function SessionList({
               {rows.map((r, i) => (
                 <li
                   aria-selected={i === sel}
-                  className={`relative -mx-3 grid cursor-pointer grid-cols-[1fr_auto_auto_auto_auto] items-center gap-5 rounded-lg border-b border-line px-3 py-4 hover:bg-cream/[0.03] ${i === sel ? "bg-cream/[0.05]" : ""} ${r.pending ? "opacity-50" : ""}`}
+                  className={`relative -mx-3 grid cursor-pointer grid-cols-[1fr_auto_auto_auto_auto] items-center gap-5 border-b border-line px-3 py-4 hover:bg-cream/[0.03] ${i === sel ? "bg-cream/[0.05]" : ""} ${r.pending ? "opacity-50" : ""}`}
                   data-row={i}
                   key={r.id}
                   onClick={() => {

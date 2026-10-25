@@ -16,18 +16,8 @@ function OverviewShell() {
           </div>
         ))}
       </dl>
-      <div className="flex w-full items-center justify-between gap-4 rounded-xl border border-line bg-panel/55 p-4">
-        <div className="flex min-w-0 items-center gap-4">
-          <span aria-hidden="true" className="flex size-11 shrink-0 items-center justify-center rounded-lg border border-mint/20 bg-mint/[0.07] font-mono text-2xl text-mint">+</span>
-          <div className="min-w-0">
-            <p className="m-0 text-sm text-cream">Start a block</p>
-            <p className="m-0 mt-1 text-xs text-mist">Choose a goal and make space for it.</p>
-          </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-2 font-mono text-[10px] uppercase tracking-wide text-mist/70">
-          <span>Press</span>
-          <kbd className="flex h-7 min-w-7 items-center justify-center rounded-md border border-line border-b-2 bg-ink px-2 text-xs text-cream">+</kbd>
-        </div>
+      <div aria-hidden="true" className="flex h-10 items-center">
+        <span className="h-px w-full bg-line" />
       </div>
     </section>
   );

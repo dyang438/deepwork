@@ -91,3 +91,9 @@ export const cliAgents = pgTable("cli_agents", {
   host: text("host"),
   seen_at: timestamp("seen_at", { withTimezone: true }).notNull(),
 });
+
+// Private calendar feed (ICS) per user: /cal/<token>.ics, for subscribing from Google Calendar & co.
+export const calFeeds = pgTable("cal_feeds", {
+  user_id: uuid("user_id").primaryKey(),
+  token: text("token").notNull().unique(),
+});

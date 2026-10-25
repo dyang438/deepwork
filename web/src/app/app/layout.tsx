@@ -43,12 +43,12 @@ export default function AppLayout({ children }: { children: ReactNode }) {
         <Image alt="" className="object-cover object-[50%_25%] opacity-90" fill placeholder="blur" priority sizes="100vw" src={roses} />
         <div className="absolute inset-0 bg-gradient-to-b from-ink/0 via-ink/45 to-ink" />
       </div>
-      <div className="relative mx-auto w-full max-w-3xl px-5 pt-6 pb-32">
-        <header className="mb-32">
-          <Link aria-label="Home" className="inline-block" href="/">
-            <Logo className="size-14" />
-          </Link>
-        </header>
+      <header className="relative px-6 pt-6 sm:px-8">
+        <Link aria-label="Home" className="inline-block" href="/">
+          <Logo className="size-14" />
+        </Link>
+      </header>
+      <div className="relative mx-auto w-full max-w-3xl px-5 pt-32 pb-32">
         {children}
       </div>
       <nav aria-label="Sections" className="fixed bottom-5 left-1/2 z-20 -translate-x-1/2">

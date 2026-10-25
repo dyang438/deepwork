@@ -16,7 +16,7 @@ export function CompList({ comps }: { comps: Comp[] }) {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || document.querySelector('[role="dialog"]')) return;
+      if (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || document.querySelector("[data-dw-dialog]")) return;
       const { sel, comps } = state.current;
       if (e.key === "j") setSel(Math.min(sel + 1, comps.length - 1));
       else if (e.key === "k") setSel(Math.max(sel - 1, 0));
