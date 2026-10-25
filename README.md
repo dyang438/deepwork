@@ -54,7 +54,6 @@ Flags: `-y` skips the questions, `-g "goal"` sets the goal, `--dry-run` does eve
 ```json
 {
   "tracking": true,
-  "share_scoreboard": true,
   "music_pause": false,
   "sounds": {"start": null, "notify": "Glass"},
   "quit_apps": ["Slack", "Shortwave", "Messages", "Mail"],
@@ -83,7 +82,7 @@ Flags: `-y` skips the questions, `-g "goal"` sets the goal, `--dry-run` does eve
 
 ## Privacy
 
-Everything stays on your Mac in `~/.deepwork`: the log, the samples and your captures. The extension only talks to deepwork on `127.0.0.1` and never sends paths, page titles or content. The one exception is the optional team scoreboard: when the [maingen](https://maingen.ai) CLI is installed and `share_scoreboard` is on, each session adds a one-line summary (name, minutes, goal, focus %, outcome) to a shared page. No app or site lists are ever shared.
+Everything stays on your Mac in `~/.deepwork`: the log, the samples and your captures. The extension only talks to deepwork on `127.0.0.1` and never sends paths, page titles or content.
 
 ## Contributing
 

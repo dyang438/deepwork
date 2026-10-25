@@ -15,7 +15,6 @@ isolated state in ~/.deepwork-dryrun, nothing written to the real log).
 """
 import collections
 import datetime as dt
-import fcntl
 import http.server
 import json
 import os
@@ -26,7 +25,6 @@ import socketserver
 import subprocess
 import shutil
 import sys
-import tempfile
 import threading
 import time
 
@@ -41,13 +39,11 @@ CHROME = "Google Chrome"
 DAILY_CAP_MIN = 240           # experimental: warn (never block) past this many deep minutes a day
 BREAK_DELAY_S = 300           # experimental: a break never starts sooner than 5 minutes after asking
 HALFWAY_WALK_OVER_MIN = 90    # experimental: halfway walk nudge for sessions longer than this
-SCOREBOARD_SLUG = "deepwork/scoreboard"
 
 # Per-person settings live in ~/.deepwork/config.json (deepwork config shows it). A question set to
 # false (or deleted) is skipped; a string replaces its wording; "custom" adds your own questions (answers are logged).
 DEFAULT_CONFIG = {
     "tracking": True,          # sample front app, Chrome site and blocked-site pulls (stays on this Mac)
-    "share_scoreboard": True,  # add one summary row per session to the shared kb scoreboard
     "quit_apps": APPS,
     "music_pause": False,
     "sounds": {"start": None, "notify": "Glass"},
@@ -104,22 +100,14 @@ class Cfg:
         self.active = os.path.join(self.state, "active.json")
         self.actions = os.path.join(self.state, "actions.log")
         self.wdlog = os.path.join(self.state, "watchdog.log")
-        self.share_queue = os.path.join(self.state, "share-queue.jsonl")
         self.goal_apps = os.environ.get("DEEPWORK_GOAL_APPS", os.path.join(ROOT, "goal-apps.json"))
         self.git_root = os.environ.get("DEEPWORK_GIT_ROOT", os.path.dirname(ROOT))
-        self.maingen = os.environ.get("DEEPWORK_MAINGEN", "maingen")
-        # Team extras (backlog task counts, shared scoreboard) need the maingen CLI; off in dry runs unless a test
-        # turns them on explicitly.
-        team = "0" if dry or not shutil.which(self.maingen) else "1"
-        self.backlog = os.environ.get("DEEPWORK_BACKLOG", team) == "1"
-        self.share = os.environ.get("DEEPWORK_SHARE", team) == "1"
         delay = float(os.environ.get("DEEPWORK_BREAK_DELAY", BREAK_DELAY_S))
         self.break_delay = delay if dry else max(delay, BREAK_DELAY_S)
         self.config = os.environ.get("DEEPWORK_CONFIG", os.path.join(
             os.environ.get("DEEPWORK_HOME", os.path.join(home, ".deepwork")), "config.json"))
         self.conf = load_config(self.config)
         self.apps = list(self.conf["quit_apps"])
-        self.share = self.share and bool(self.conf["share_scoreboard"])
         self.tracking = bool(self.conf["tracking"])
 
 
@@ -419,19 +407,14 @@ def _shutdown(cfg, assume_yes, s):
                               breaks=breaks) if s.get("samples_path") else None,
         "breaks": [{"start": iso(b0), "end": iso(min(b1, ended)), "minutes": round((min(b1, ended) - b0) / 60, 1)}
                    for b0, b1 in breaks],
-        "tasks": {"self": self_count, "backlog_closed": None, "git_commits": git},
+        "tasks": {"self": self_count, "git_commits": git},
     }
     rec["tasks"]["used"] = tasks_used(rec["tasks"])
     with open(cfg.log, "a") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
         f.write(json.dumps(rec) + "\n")
     if rec["activity"]:
         print(session_line(rec))
         print(experimental_line(rec))
-    if rec["kind"] == "deep" and (cfg.share or (cfg.backlog and s.get("samples_path"))):
-        # The backlog pull takes about a minute; never make the next session wait for it.
-        spawn(cfg, "_finish", rec["start"], s.get("samples_path") or "")
-        print("Backlog count and scoreboard share continue in the background.")
     if rec["kind"] == "baseline":
         return print("Baseline logged (%.0f min)." % rec["minutes"])
     print("Logged %.0f min. Shutdown complete." % rec["minutes"])
@@ -635,11 +618,9 @@ def score(cfg, everyone):
 # ---------- experimental metrics ----------
 
 def tasks_used(t):
-    """Tasks for the tasks-per-hour metric: his own count when given, else backlog closures, else n/a."""
+    """Tasks for the tasks-per-hour metric: his own count when given, else n/a."""
     if t.get("self") is not None:
         return {"n": t["self"], "source": "self"}
-    if t.get("backlog_closed") is not None:
-        return {"n": t["backlog_closed"], "source": "backlog"}
     return None  # git commits are recorded only: agents commit under his name
 
 
@@ -719,127 +700,11 @@ def git_commits(root, author, since, until):
 AGENT_TRAILER = re.compile(r"co-authored-by:.*(claude|codex|anthropic|openai)", re.I)
 
 
-def backlog_snapshot(cfg):
-    """{slug: [status, owner]} for backlog/tasks, via maingen kb pull (read only)."""
-    d = tempfile.mkdtemp(prefix="deepwork-backlog-")
-    try:
-        r = subprocess.run([cfg.maingen, "kb", "pull", "backlog/tasks", d], capture_output=True, text=True, timeout=180)
-        if r.returncode != 0:
-            return None
-        snap = {}
-        for name in os.listdir(d):
-            if name.endswith(".md"):
-                txt = open(os.path.join(d, name)).read()
-                st = re.search(r"^status:\s*'?([\w-]+)", txt, re.M)
-                ow = re.search(r"^owner:\s*'?([\w-]+)", txt, re.M)
-                snap[name[:-3]] = [st.group(1) if st else None, ow.group(1) if ow else None]
-        return snap
-    except Exception:
-        return None
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
-
-
-def backlog_closed(before, after, who):
-    """Items now done that were not done or dropped at the start (or are new), owned by who or either."""
-    if before is None or after is None:
-        return None
-    n = 0
-    for slug, (status, owner) in after.items():
-        prev = (before.get(slug) or [None])[0]
-        if status == "done" and prev not in ("done", "dropped") and owner in (who, "either"):
-            n += 1
-    return n
-
-
-def before_path(s):
-    return s["samples_path"].replace(".jsonl", ".backlog-before.json")
-
-
 def count_commits(cfg, s, ended):
     try:
         return git_commits(cfg.git_root, os.environ.get("DEEPWORK_GIT_AUTHOR", cfg.who), s["start"], ended)
     except Exception:
         return None
-
-
-def finish(cfg, start, samples_path):
-    """Detached after shutdown: backlog closures into the logged record, then the scoreboard row."""
-    rec = next((r for r in load_log(cfg.log) if r.get("start") == start and r.get("kind", "deep") == "deep"), None)
-    if not rec:
-        return
-    if cfg.backlog and samples_path:
-        before = read_json(before_path({"samples_path": samples_path}))
-        rec["tasks"]["backlog_closed"] = backlog_closed(before, backlog_snapshot(cfg), rec.get("who", cfg.who))
-        rec["tasks"]["used"] = tasks_used(rec["tasks"])
-        with open(cfg.log, "r+") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            lines = f.readlines()
-            for i, line in enumerate(lines):
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    continue
-                if r.get("start") == start and r.get("kind", "deep") == "deep":
-                    lines[i] = json.dumps(rec) + "\n"
-            f.seek(0)
-            f.writelines(lines)
-            f.truncate()
-    if cfg.share:
-        print(share_row(cfg, rec), flush=True)
-    print("%s finish %s done" % (iso(now()), start), flush=True)
-
-
-# ---------- shared scoreboard (kb page deepwork/scoreboard) ----------
-
-SCOREBOARD_HEAD = ("---\ntitle: deepwork scoreboard\ntype: concept\ntags:\n  - deepwork\n---\n# deepwork scoreboard\n\nOne row per deep work session, appended automatically by `deepwork`.\n\n"
-                   "| who | date | minutes | goal | focus | tasks per hour | goal hit |\n|---|---|---|---|---|---|---|\n")
-
-
-def shared_row(rec):
-    """Summary only: no app or domain lists."""
-    a = rec.get("activity") or {}
-    used = (rec.get("tasks") or {}).get("used")
-    hours = (rec.get("minutes") or 0) / 60
-    cells = [rec.get("who"), rec["start"][:16].replace("T", " "), "%.0f" % (rec.get("minutes") or 0),
-             (rec.get("goal") or "").replace("|", "/").replace("\n", " ")[:120],
-             "-" if a.get("focus_ratio") is None else "%.0f%%" % (100 * a["focus_ratio"]),
-             "-" if not used or not hours else "%.1f" % (used["n"] / hours), rec.get("outcome") or "-"]
-    return "| " + " | ".join(str(c) for c in cells) + " |"
-
-
-def share_row(cfg, rec):
-    queue = load_log(cfg.share_queue)
-    rows = [q["row"] for q in queue] + [shared_row(rec)]
-    try:
-        r = subprocess.run([cfg.maingen, "kb", "read", SCOREBOARD_SLUG], capture_output=True, text=True, timeout=60)
-        rev = None
-        if r.returncode == 0:
-            m = re.search(r"revision:\s*(\S+)", r.stderr) or re.search(r"^revision:\s*(\S+)\n", r.stdout)
-            body = r.stdout
-            if body.startswith("revision:"):
-                body = body.split("\n", 1)[1] if "\n" in body else ""
-            rev = m.group(1) if m else None
-            if rev is None:
-                raise RuntimeError("no revision from kb read")
-        else:
-            body = SCOREBOARD_HEAD
-        new = body.rstrip("\n") + "\n" + "\n".join(rows) + "\n"
-        fd, tmp = tempfile.mkstemp(suffix=".md")
-        with os.fdopen(fd, "w") as f:
-            f.write(new)
-        cmd = [cfg.maingen, "kb", "write", SCOREBOARD_SLUG, "--file", tmp] + (["--expected-revision", rev] if rev else [])
-        w = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        rm(tmp)
-        if w.returncode != 0:
-            raise RuntimeError("kb write failed")
-    except Exception:
-        with open(cfg.share_queue, "w") as f:
-            for row in rows:
-                f.write(json.dumps({"row": row}) + "\n")
-        return "Scoreboard share failed; queued %d row(s), retrying after the next session." % len(rows)
-    rm(cfg.share_queue)
-    return "Shared %d row(s) to %s." % (len(rows), SCOREBOARD_SLUG)
 
 
 # ---------- breaks (experimental) ----------
@@ -929,11 +794,7 @@ def clean_domain(d):
 # ---------- watchdog ----------
 
 def spawn_watchdog(cfg):
-    return spawn(cfg, "_watchdog")
-
-
-def spawn(cfg, *cmd):
-    """Double fork + setsid so the child survives the terminal closing. Returns its pid."""
+    """Double fork + setsid so the watchdog survives the terminal closing. Returns its pid."""
     r, w = os.pipe()
     pid = os.fork()
     if pid == 0:
@@ -949,7 +810,7 @@ def spawn(cfg, *cmd):
         os.dup2(nul, 0)
         os.dup2(fd, 1)
         os.dup2(fd, 2)
-        args = [sys.executable, os.path.realpath(__file__), *cmd] + (["--dry-run"] if cfg.dry else [])
+        args = [sys.executable, os.path.realpath(__file__), "_watchdog"] + (["--dry-run"] if cfg.dry else [])
         os.execv(sys.executable, args)
     os.close(w)
     data = os.read(r, 32)
@@ -1025,8 +886,6 @@ def watchdog(cfg):
     if cfg.tracking:
         threading.Thread(target=sampler, args=(cfg, rec), daemon=True).start()
     deep = s0.get("kind", "deep") == "deep"
-    if deep and cfg.backlog and s0.get("samples_path") and not os.path.exists(before_path(s0)):
-        threading.Thread(target=lambda: write_json(before_path(s0), backlog_snapshot(cfg)), daemon=True).start()
     halfway = s0.get("start", 0) + (s0.get("end", 0) - s0.get("start", 0)) / 2
     walk_due = deep and s0.get("planned_minutes", 0) > HALFWAY_WALK_OVER_MIN and now() < halfway + 60
     on_break = None
@@ -1097,8 +956,6 @@ def main(argv):
     cmd = rest[0] if rest else str(DEFAULT_MIN)
     if cmd == "_watchdog":
         return watchdog(cfg)
-    if cmd == "_finish":
-        return finish(cfg, rest[1], rest[2])
     if cmd == "off":
         return off(cfg, assume_yes)
     if cmd == "status":

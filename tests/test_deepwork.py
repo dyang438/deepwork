@@ -28,10 +28,8 @@ class Base(unittest.TestCase):
                         DEEPWORK_CAPTURE=os.path.join(self.tmp, "capture.md"),
                         DEEPWORK_PORT=str(48000 + os.getpid() % 1000), DEEPWORK_WHO="tester",
                         DEEPWORK_SAMPLE_EVERY="1", DEEPWORK_GIT_ROOT=os.path.join(self.tmp, "repos"),
-                        DEEPWORK_MAINGEN=os.path.join(ROOT, "tests", "fake_maingen.py"),
-                        FAKE_KB_DIR=os.path.join(self.tmp, "kb"), DEEPWORK_BREAK_DELAY="2")
+                        DEEPWORK_BREAK_DELAY="2")
         os.makedirs(self.env["DEEPWORK_GIT_ROOT"])
-        os.makedirs(self.env["FAKE_KB_DIR"])
 
     def run_cli(self, *args, stdin=""):
         return subprocess.run([CLI, "--dry-run", *args], input=stdin, env=self.env,
@@ -39,15 +37,6 @@ class Base(unittest.TestCase):
 
     def path(self, *p):
         return os.path.join(self.tmp, *p)
-
-    def wait_finish(self, n):
-        """Wait for the nth detached post-shutdown step; return its watchdog.log output."""
-        for _ in range(100):
-            log = open(self.path("state", "watchdog.log")).read()
-            if log.count(" done\n") >= n:
-                return log
-            time.sleep(0.1)
-        self.fail("finish step never completed")
 
     def tearDown(self):
         s = dw.read_json(self.path("state", "session.json"))
@@ -278,22 +267,10 @@ class TestExperimental(Base):
         self.assertIn("Halfway. Take a short walk", open(self.path("state", "actions.log")).read())
         self.run_cli("off", "-y")
 
-    def test_backlog_git_and_share(self):
-        kb = self.env["FAKE_KB_DIR"]
-        os.makedirs(os.path.join(kb, "backlog", "tasks"))
-        def task(slug, status, owner):
-            open(os.path.join(kb, "backlog", "tasks", slug + ".md"), "w").write(
-                "---\ntitle: x\nowner: %s\nstatus: %s\n---\nbody\n" % (owner, status))
-        task("bl-1", "open", "tester"); task("bl-2", "open", "david"); task("bl-3", "done", "tester")
+    def test_git_commits_counted(self):
         repo = os.path.join(self.env["DEEPWORK_GIT_ROOT"], "proj")
         subprocess.run(["git", "init", "-q", repo], check=True)
-        self.env["DEEPWORK_BACKLOG"] = "1"
-        self.env["DEEPWORK_SHARE"] = "1"
-        self.run_cli("10", "-y", "-g", "ship | it")
-        time.sleep(1.5)  # before-snapshot
-        self.assertTrue(os.path.exists(dw.read_json(self.path("state", "session.json"))["samples_path"]
-                                       .replace(".jsonl", ".backlog-before.json")))
-        task("bl-1", "done", "tester"); task("bl-2", "done", "david"); task("bl-4", "done", "either")
+        self.run_cli("10", "-y", "-g", "ship it")
         genv = dict(self.env, GIT_AUTHOR_NAME="Tester", GIT_AUTHOR_EMAIL="t@x", GIT_COMMITTER_NAME="T",
                     GIT_COMMITTER_EMAIL="t@x")
         for i in range(2):
@@ -303,41 +280,11 @@ class TestExperimental(Base):
         genv["GIT_AUTHOR_NAME"] = "David"
         subprocess.run(["git", "-C", repo, "commit", "-q", "--allow-empty", "-m", "d"], env=genv, check=True)
         time.sleep(1.1)
-        r = self.run_cli("off", "-y")
-        self.assertIn("continue in the background", r.stdout)
-        log = self.wait_finish(1)
+        self.run_cli("off", "-y")
         rec = json.loads(open(self.env["DEEPWORK_LOG"]).read().strip())
-        self.assertEqual(rec["tasks"]["backlog_closed"], 2)  # bl-1 and new bl-4; not David's, not already done
         self.assertEqual(rec["tasks"]["git_commits"], 2)
-        self.assertEqual(rec["tasks"]["used"], {"n": 2, "source": "backlog"})  # commits never count
+        self.assertIsNone(rec["tasks"]["used"])  # commits never count
         self.assertIn("commits (mostly agents) 2", self.run_cli("stats").stdout)
-        self.assertIn("Shared 1 row", log)
-        page = open(os.path.join(kb, "deepwork", "scoreboard.md")).read()
-        self.assertIn("| who | date | minutes | goal |", page)
-        row = page.strip().splitlines()[-1]
-        self.assertTrue(row.startswith("| tester |"))
-        self.assertIn("ship / it", row)
-        for leak in ("Google Chrome", "github", "top_apps", "Finder"):
-            self.assertNotIn(leak, row)
-
-        # Write failure queues the row; the next session sends both.
-        open(os.path.join(kb, "FAIL"), "w").close()
-        self.env["DEEPWORK_BACKLOG"] = "0"
-        self.run_cli("10", "-y", "-g", "second")
-        self.run_cli("off", "-y")
-        self.assertIn("queued 1 row", self.wait_finish(2))
-        os.remove(os.path.join(kb, "FAIL"))
-        self.run_cli("10", "-y", "-g", "third")
-        self.run_cli("off", "-y")
-        self.assertIn("Shared 2 row", self.wait_finish(3))
-        rows = [l for l in open(os.path.join(kb, "deepwork", "scoreboard.md")) if l.startswith("| tester")]
-        self.assertEqual(len(rows), 3)
-        self.assertEqual(open(os.path.join(kb, "deepwork", "scoreboard.md.rev")).read(), "2")
-        self.assertFalse(os.path.exists(self.path("state", "share-queue.jsonl")))
-
-    def test_dry_run_never_shares_by_default(self):
-        self.assertFalse(dw.Cfg(True).share)
-        self.assertFalse(dw.Cfg(True).backlog)
 
     def test_daily_cap_warning(self):
         today = dt.date(2026, 10, 15)
@@ -375,22 +322,21 @@ class TestSummarize(unittest.TestCase):
         self.assertIn("focus  91%", dw.session_line({"start": "2026-10-15T10:00:00", "minutes": 4, "goal": "g", "activity": a}))
 
     def test_on_goal_and_breaks(self):
-        goal = ({"cursor", "terminal"}, ["github.com", "*.maingen.ai", "notion.so"])
+        goal = ({"cursor", "terminal"}, ["github.com", "*.example.com", "notion.so"])
         evs = [{"type": "sample", "t": i, "every": 10, "active": True, "app": app, "domain": dom}
                for i, (app, dom) in enumerate([("Cursor", None), ("Google Chrome", "github.com"),
-                                               ("Google Chrome", "docs.maingen.ai"), ("Google Chrome", "maingen.ai"),
+                                               ("Google Chrome", "docs.example.com"), ("Google Chrome", "example.com"),
                                                ("Google Chrome", "x.com"), ("Slack", None), ("Google Chrome", "notion.so"),
                                                ("Terminal", None)])]
         a = dw.summarize(evs, goal=goal)
-        self.assertEqual(a["on_goal_ratio"], round(5 / 8, 2))  # bare maingen.ai is not in this list
+        self.assertEqual(a["on_goal_ratio"], round(5 / 8, 2))  # bare example.com is not in this list
         a = dw.summarize(evs, goal=goal, breaks=[[4, 6]])  # samples at t=4,5 fall in a break
         self.assertEqual(a["samples"], 6)
         self.assertEqual(a["on_goal_ratio"], round(5 / 6, 2))
 
     def test_tasks_used_sources(self):
-        self.assertEqual(dw.tasks_used({"self": 2, "backlog_closed": 5, "git_commits": 9}), {"n": 2, "source": "self"})
-        self.assertEqual(dw.tasks_used({"self": None, "backlog_closed": 1, "git_commits": 9}), {"n": 1, "source": "backlog"})
-        self.assertIsNone(dw.tasks_used({"self": None, "backlog_closed": None, "git_commits": 9}))
+        self.assertEqual(dw.tasks_used({"self": 2, "git_commits": 9}), {"n": 2, "source": "self"})
+        self.assertIsNone(dw.tasks_used({"self": None, "git_commits": 9}))
         self.assertIn("tasks n/a", dw.experimental_line({"start": "2026-10-15T10:00", "minutes": 60,
                                                          "tasks": {"used": None, "git_commits": 9}}))
 
@@ -400,7 +346,7 @@ class TestSummarize(unittest.TestCase):
                     "tasks": {"used": used}, "breaks": [{"minutes": 10}] * breaks,
                     "activity": {"on_goal_ratio": 0.5, "blocked_attempts": {"x.com": hits}}}
         out = "\n".join(dw.experimental_week([r(60, "done", {"n": 3, "source": "self"}, 4, 1),
-                                               r(60, "partial", {"n": 1, "source": "backlog"}),
+                                               r(60, "partial", {"n": 1, "source": "self"}),
                                                r(60, "not done", None)]))
         self.assertIn("tasks per deep hour 2.0 (4 tasks over 2.0 h)", out)
         self.assertIn("time on goal 50%", out)
