@@ -26,9 +26,8 @@ export default function Home() {
       </div>
 
       <section className="relative z-10 flex min-h-[calc(100vh-61px)] flex-col justify-end px-6 pb-16 sm:px-8 sm:pb-20">
-        <p className="eyebrow mb-5 flex items-center gap-2">
-          <span aria-hidden="true" className="inline-block size-1.5 rounded-full bg-mint" />
-          Deep work, after Cal Newport
+        <p className="eyebrow mb-5">
+          Inspired by Cal Newport&apos;s <em>Deep Work: Rules for Focused Success in a Distracted World</em>
         </p>
         <h1 className="m-0 max-w-3xl text-[44px] leading-[1.05] font-normal tracking-[-0.04em] sm:text-[64px]">
           Do the work that matters, <span className="text-mint">one deep block</span> at a time.
