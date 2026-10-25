@@ -2,16 +2,14 @@
 """deepwork: timed deep work sessions on macOS.
 
   deepwork [min]          start a session (default 90 minutes)
-  deepwork off            end the session now and run the shutdown ritual
+  deepwork off            end the session now and run the shutdown questions
   deepwork status         show the current session
-  deepwork stats          deep hours today, this week, per goal (--all includes everyone in the log)
+  deepwork stats          deep hours today, this week, per goal (--all includes everyone in the store)
   deepwork capture "..."  append a stray thought to the capture file
-  deepwork baseline [min] sample activity with no blocking (default 60), to compare with deep work
-  deepwork break [min]    (experimental) plan a break (default 10) that starts 5 min from now
-  deepwork questions      edit your questions, sounds, music pause and apps to quit in $EDITOR (vim)
-  deepwork config         print that settings file
-Flags: -y (skip prompts), -g "goal", --dry-run (no apps quit, no DND,
-isolated state in ~/.deepwork-dryrun, nothing written to the real log).
+  deepwork sync           push the local log to the database (database_url in settings)
+  deepwork questions      edit your settings in $EDITOR
+  deepwork config         print your settings
+Flags: -y (skip questions), -g "goal", --dry-run (no apps quit, no DND, isolated state in ~/.deepwork-dryrun).
 """
 import collections
 import datetime as dt
@@ -20,31 +18,27 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import socketserver
 import subprocess
-import shutil
 import sys
 import threading
 import time
 
-ROOT = os.path.dirname(os.path.realpath(__file__))
-APPS = ["Slack", "Shortwave", "Messages", "Mail"]  # desktop apps only; never Chrome
 SHORTCUT_ON, SHORTCUT_OFF = "deepwork-on", "deepwork-off"
 DEFAULT_MIN = 90
 REQUIT_EVERY = 3
 SAMPLE_EVERY = float(os.environ.get("DEEPWORK_SAMPLE_EVERY", "10"))
 ACTIVE_WITHIN = 60  # a sample is active if there was keyboard or mouse input in the last 60 s
 CHROME = "Google Chrome"
-DAILY_CAP_MIN = 240           # experimental: warn (never block) past this many deep minutes a day
-BREAK_DELAY_S = 300           # experimental: a break never starts sooner than 5 minutes after asking
-HALFWAY_WALK_OVER_MIN = 90    # experimental: halfway walk nudge for sessions longer than this
 
-# Per-person settings live in ~/.deepwork/config.json (deepwork config shows it). A question set to
-# false (or deleted) is skipped; a string replaces its wording; "custom" adds your own questions (answers are logged).
+# Settings live in ~/.deepwork/config.json. A question set to false (or deleted) is skipped; a string replaces
+# its wording; "custom" adds your own questions (answers are logged).
 DEFAULT_CONFIG = {
-    "tracking": True,          # sample front app, Chrome site and blocked-site pulls (stays on this Mac)
-    "quit_apps": APPS,
+    "tracking": True,  # sample front app, Chrome site and blocked-site pulls
+    "database_url": None,  # postgres://... to also keep sessions in Postgres (needs psql)
+    "quit_apps": ["Slack", "Shortwave", "Messages", "Mail"],  # desktop apps only; never Chrome
     "music_pause": False,
     "sounds": {"start": None, "notify": "Glass"},
     "start_questions": {
@@ -52,7 +46,6 @@ DEFAULT_CONFIG = {
         "deadline": "Deadline, keep it tight [{suggested}]: ",
         "checklist": ["water or coffee", {"item": "food", "over_minutes": 90}, "phone in another room",
                       "materials open"],
-        "extra_sites": "Extra sites for this goal, comma separated (Enter for none): ",
         "custom": [],
     },
     "shutdown_questions": {
@@ -60,65 +53,12 @@ DEFAULT_CONFIG = {
         "done": "One line on what got done: ",
         "open_loops": "Open loops, one per line (empty line to finish):",
         "tomorrow": "Tomorrow's main deep block (what and when): ",
-        "task_count": "How many tasks did you finish? (Enter skips): ",
         "custom": [],
     },
 }
 
 
-def load_config(path):
-    conf = json.loads(json.dumps(DEFAULT_CONFIG))
-    user = read_json(path) if os.path.exists(path) else None
-    for k, v in (user or {}).items():
-        if k.endswith("_questions") and isinstance(v, dict):
-            conf[k] = {q: v.get(q, False) for q in conf[k]}  # a question deleted from the file is skipped
-        elif isinstance(v, dict) and isinstance(conf.get(k), dict):
-            conf[k].update(v)
-        elif k in conf:
-            conf[k] = v
-    return conf
-
-
-# ---------- configuration ----------
-
-class Cfg:
-    def __init__(self, dry):
-        self.dry = dry
-        home = os.path.expanduser("~")
-        default_state = os.path.join(home, ".deepwork-dryrun" if dry else ".deepwork")
-        self.state = os.environ.get("DEEPWORK_HOME", default_state)
-        # Older installs kept their log next to the script; keep using it there if it exists.
-        legacy = os.path.exists(os.path.join(ROOT, "log.jsonl"))
-        data = os.path.join(self.state, "dryrun-data") if dry else (ROOT if legacy else self.state)
-        self.log = os.environ.get("DEEPWORK_LOG", os.path.join(data, "log.jsonl"))
-        self.capture = os.environ.get("DEEPWORK_CAPTURE", os.path.join(data, "capture.md"))
-        self.sessions = os.path.join(os.path.dirname(self.log), "sessions")
-        self.port = int(os.environ.get("DEEPWORK_PORT", "47616" if dry else "47615"))
-        self.who = os.environ.get("DEEPWORK_WHO", os.environ.get("USER", "unknown"))
-        self.session = os.path.join(self.state, "session.json")
-        self.pending = os.path.join(self.state, "pending.json")
-        self.active = os.path.join(self.state, "active.json")
-        self.actions = os.path.join(self.state, "actions.log")
-        self.wdlog = os.path.join(self.state, "watchdog.log")
-        self.goal_apps = os.environ.get("DEEPWORK_GOAL_APPS", os.path.join(ROOT, "goal-apps.json"))
-        self.git_root = os.environ.get("DEEPWORK_GIT_ROOT", os.path.dirname(ROOT))
-        delay = float(os.environ.get("DEEPWORK_BREAK_DELAY", BREAK_DELAY_S))
-        self.break_delay = delay if dry else max(delay, BREAK_DELAY_S)
-        self.config = os.environ.get("DEEPWORK_CONFIG", os.path.join(
-            os.environ.get("DEEPWORK_HOME", os.path.join(home, ".deepwork")), "config.json"))
-        self.conf = load_config(self.config)
-        self.apps = list(self.conf["quit_apps"])
-        self.tracking = bool(self.conf["tracking"])
-
-
-def ensure_dirs(cfg):
-    if os.path.exists(cfg.state) and not os.path.isdir(cfg.state):
-        sys.exit("%s is a file (old v1 state?). Remove it and retry." % cfg.state)
-    os.makedirs(cfg.state, exist_ok=True)
-    for p in (cfg.log, cfg.capture):
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-    os.makedirs(cfg.sessions, exist_ok=True)
-
+# ---------- small helpers ----------
 
 def read_json(path):
     try:
@@ -135,6 +75,27 @@ def write_json(path, obj):
     os.replace(tmp, path)
 
 
+def read_jsonl(path):
+    out = []
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    pass
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def rm(path):
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
 def now():
     return time.time()
 
@@ -146,84 +107,6 @@ def iso(ts):
 def hm(ts):
     return dt.datetime.fromtimestamp(ts).strftime("%H:%M")
 
-
-# ---------- side effects (all routed through act) ----------
-
-def act(cfg, kind, *args):
-    """Run a system action, or record it when dry."""
-    line = "%s %s %s" % (iso(now()), kind, " ".join(args))
-    if cfg.dry:
-        with open(cfg.actions, "a") as f:
-            f.write(line + "\n")
-        return
-    try:
-        if kind == "quit":
-            if subprocess.run(["pgrep", "-xq", args[0]]).returncode == 0:
-                subprocess.run(["osascript", "-e", 'quit app "%s"' % args[0]], capture_output=True, timeout=10)
-        elif kind == "open":
-            subprocess.run(["open", "-g", "-a", args[0]], capture_output=True, timeout=10)
-        elif kind == "shortcut":
-            if args[0] in shortcut_names():
-                subprocess.run(["shortcuts", "run", args[0]], capture_output=True, timeout=30)
-        elif kind == "notify":
-            msg = args[0].replace('"', "'")
-            snd = cfg.conf["sounds"].get("notify")
-            subprocess.run(["osascript", "-e", 'display notification "%s" with title "deepwork"%s' % (
-                msg, ' sound name "%s"' % snd if snd else "")], capture_output=True, timeout=10)
-        elif kind == "sound":
-            subprocess.Popen(["afplay", "/System/Library/Sounds/%s.aiff" % args[0]],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        elif kind == "music_pause":
-            if shutil.which("media-control"):
-                subprocess.run(["media-control", "pause"], capture_output=True, timeout=10)
-            for a in ("Spotify", "Music"):
-                if subprocess.run(["pgrep", "-xq", a]).returncode == 0:
-                    subprocess.run(["osascript", "-e", 'tell application "%s" to pause' % a],
-                                   capture_output=True, timeout=10)
-        elif kind == "terminal":
-            # Opening a .command file needs no Automation permission (no AppleScript).
-            ok = False
-            try:
-                ok = subprocess.run(["open", args[0]], capture_output=True, timeout=30).returncode == 0
-            except subprocess.TimeoutExpired:
-                pass
-            if not ok:
-                act(cfg, "notify", "Session over. Open a terminal and run: deepwork off")
-    except Exception as e:  # never let a side effect crash the session
-        sys.stderr.write("deepwork: %s failed: %s\n" % (kind, e))
-
-
-def rm(path):
-    try:
-        os.remove(path)
-    except FileNotFoundError:
-        pass
-
-
-def shutdown_command(cfg):
-    """Write ~/.deepwork/shutdown.command; Terminal runs it when it is opened."""
-    path = os.path.join(cfg.state, "shutdown.command")
-    with open(path, "w") as f:
-        f.write("#!/bin/zsh\n'%s' off%s\n" % (os.path.realpath(__file__), " --dry-run" if cfg.dry else ""))
-    os.chmod(path, 0o755)
-    return path
-
-
-def shortcut_names():
-    try:
-        out = subprocess.run(["shortcuts", "list"], capture_output=True, text=True, timeout=15).stdout
-        return set(out.splitlines())
-    except Exception:
-        return set()
-
-
-def running_apps(cfg):
-    if cfg.dry:
-        return list(cfg.apps)
-    return [a for a in cfg.apps if subprocess.run(["pgrep", "-xq", a]).returncode == 0]
-
-
-# ---------- session lifecycle ----------
 
 def ask(prompt, default=""):
     try:
@@ -237,8 +120,184 @@ def yes(prompt):
     return ask(prompt + " [y/n] ", "n").lower().startswith("y")
 
 
-def start(cfg, minutes, assume_yes, goal, kind="deep"):
-    ensure_dirs(cfg)
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError, TypeError):
+        return False
+
+
+# ---------- configuration ----------
+
+def load_config(path):
+    conf = json.loads(json.dumps(DEFAULT_CONFIG))
+    for k, v in (read_json(path) or {}).items():
+        if k.endswith("_questions") and isinstance(v, dict) and k in conf:
+            conf[k] = {q: v.get(q, False) for q in conf[k]}  # a question deleted from the file is skipped
+        elif isinstance(v, dict) and isinstance(conf.get(k), dict):
+            conf[k].update(v)
+        elif k in conf:
+            conf[k] = v
+    return conf
+
+
+class Cfg:
+    def __init__(self, dry):
+        self.dry = dry
+        home = os.path.expanduser("~")
+        self.state = os.environ.get("DEEPWORK_HOME", os.path.join(home, ".deepwork-dryrun" if dry else ".deepwork"))
+        self.log = os.environ.get("DEEPWORK_LOG", os.path.join(self.state, "log.jsonl"))
+        self.capture = os.environ.get("DEEPWORK_CAPTURE", os.path.join(self.state, "capture.md"))
+        self.sessions = os.path.join(self.state, "sessions")
+        self.port = int(os.environ.get("DEEPWORK_PORT", "47616" if dry else "47615"))
+        self.who = os.environ.get("DEEPWORK_WHO", os.environ.get("USER", "unknown"))
+        self.session = os.path.join(self.state, "session.json")
+        self.pending = os.path.join(self.state, "pending.json")
+        self.actions = os.path.join(self.state, "actions.log")
+        self.wdlog = os.path.join(self.state, "watchdog.log")
+        self.config = os.environ.get("DEEPWORK_CONFIG", os.path.join(
+            os.environ.get("DEEPWORK_HOME", os.path.join(home, ".deepwork")), "config.json"))
+        self.conf = load_config(self.config)
+        self.apps = list(self.conf["quit_apps"])
+        self.tracking = bool(self.conf["tracking"])
+        # Dry runs never touch the configured database; tests point one in through the environment.
+        self.database_url = os.environ.get("DEEPWORK_DATABASE_URL") or (None if dry else self.conf["database_url"])
+        self.store = Store(self)
+
+    def ensure_dirs(self):
+        os.makedirs(self.sessions, exist_ok=True)
+        for p in (self.log, self.capture):
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+
+
+# ---------- storage: a local log, mirrored to Postgres when database_url is set ----------
+
+TABLE_SQL = """create table if not exists deepwork_sessions (
+  id text primary key, who text not null, started_at timestamptz not null, record jsonb not null);"""
+
+
+def record_id(r):
+    return r.get("id") or "%s/%s" % (r.get("who"), r.get("start"))
+
+
+class Store:
+    """The local log is always written first, so a session is never lost to a network problem.
+    With a database, sync() upserts the whole log (idempotent) and stats read from the database."""
+
+    def __init__(self, cfg):
+        self.log = cfg.log
+        self.url = cfg.database_url
+
+    def local(self):
+        return read_jsonl(self.log)
+
+    def add(self, rec):
+        with open(self.log, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+        if self.url:
+            try:
+                return "Synced %d session(s) to the database." % self.sync()
+            except Exception as e:
+                return "Database sync failed (%s); saved locally, retried on the next sync." % e
+
+    def records(self):
+        if not self.url:
+            return self.local()
+        try:
+            self.sync()
+            out = self.psql("select record::text from deepwork_sessions order by started_at;")
+            return [json.loads(line) for line in out.splitlines() if line.strip()]
+        except Exception as e:
+            print("(database unreachable: %s; showing the local log)" % e, file=sys.stderr)
+            return self.local()
+
+    def sync(self):
+        rows = list({record_id(r): dict(r, id=record_id(r)) for r in self.local()}.values())  # last copy wins
+        if not rows:
+            self.psql(TABLE_SQL)
+            return 0
+        data = json.dumps(rows)
+        tag = "$dw$"
+        while tag in data:
+            tag = "$dw%d$" % len(tag)
+        self.psql(TABLE_SQL + """
+insert into deepwork_sessions (id, who, started_at, record)
+select r->>'id', r->>'who', (r->>'start')::timestamptz, r from jsonb_array_elements(%s%s%s::jsonb) r
+on conflict (id) do update set record = excluded.record, who = excluded.who, started_at = excluded.started_at;"""
+                  % (tag, data, tag))
+        return len(rows)
+
+    def psql(self, sql):
+        if not shutil.which("psql"):
+            raise RuntimeError("psql not found (brew install libpq)")
+        r = subprocess.run(["psql", self.url, "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1"],
+                           input=sql, capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "psql failed")
+        return r.stdout
+
+
+# ---------- side effects (all routed through act) ----------
+
+def act(cfg, kind, *args):
+    """Run a system action, or record it when dry."""
+    if cfg.dry:
+        with open(cfg.actions, "a") as f:
+            f.write("%s %s %s\n" % (iso(now()), kind, " ".join(args)))
+        return
+    run = lambda *cmd, t=10: subprocess.run(list(cmd), capture_output=True, timeout=t)
+    running = lambda app: subprocess.run(["pgrep", "-xq", app]).returncode == 0
+    try:
+        if kind == "quit":
+            if running(args[0]):
+                run("osascript", "-e", 'quit app "%s"' % args[0])
+        elif kind == "open":
+            run("open", "-g", "-a", args[0])
+        elif kind == "shortcut":
+            names = subprocess.run(["shortcuts", "list"], capture_output=True, text=True, timeout=15).stdout
+            if args[0] in names.splitlines():
+                run("shortcuts", "run", args[0], t=30)
+        elif kind == "notify":
+            snd = cfg.conf["sounds"].get("notify")
+            run("osascript", "-e", 'display notification "%s" with title "deepwork"%s' % (
+                args[0].replace('"', "'"), ' sound name "%s"' % snd if snd else ""))
+        elif kind == "sound":
+            subprocess.Popen(["afplay", "/System/Library/Sounds/%s.aiff" % args[0]],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif kind == "music_pause":
+            if shutil.which("media-control"):
+                run("media-control", "pause")
+            for app in ("Spotify", "Music"):
+                if running(app):
+                    run("osascript", "-e", 'tell application "%s" to pause' % app)
+        elif kind == "terminal":
+            # Opening a .command file needs no Automation permission (no AppleScript).
+            if run("open", args[0], t=30).returncode != 0:
+                act(cfg, "notify", "Session over. Open a terminal and run: deepwork off")
+    except Exception as e:  # never let a side effect crash the session
+        sys.stderr.write("deepwork: %s failed: %s\n" % (kind, e))
+
+
+def running_apps(cfg):
+    if cfg.dry:
+        return list(cfg.apps)
+    return [a for a in cfg.apps if subprocess.run(["pgrep", "-xq", a]).returncode == 0]
+
+
+def shutdown_command(cfg):
+    """Write shutdown.command; Terminal runs it when it is opened."""
+    path = os.path.join(cfg.state, "shutdown.command")
+    with open(path, "w") as f:
+        f.write("#!/bin/zsh\n'%s' off%s\n" % (os.path.realpath(__file__), " --dry-run" if cfg.dry else ""))
+    os.chmod(path, 0o755)
+    return path
+
+
+# ---------- session lifecycle ----------
+
+def start(cfg, minutes, assume_yes, goal):
+    cfg.ensure_dirs()
     if os.path.exists(cfg.session):
         s = read_json(cfg.session) or {}
         sys.exit("A session is already running until %s. Use: deepwork status / deepwork off" % hm(s.get("end", 0)))
@@ -248,11 +307,7 @@ def start(cfg, minutes, assume_yes, goal, kind="deep"):
 
     start_ts = now()
     end_ts = start_ts + minutes * 60
-    checklist = {}
-    deadline = hm(end_ts)
-    if kind == "baseline":
-        assume_yes, goal, deadline = True, goal or "baseline (normal work)", ""
-    goal_domains, answers = [], {}
+    deadline, checklist, answers = hm(end_ts), {}, {}
     if not assume_yes:
         q = cfg.conf["start_questions"]
         if q.get("goal"):
@@ -266,40 +321,24 @@ def start(cfg, minutes, assume_yes, goal, kind="deep"):
             print("Support checklist:")
         for it in items:
             checklist[it] = yes("  %s?" % it)
-        if q.get("extra_sites"):
-            extra = ask(q["extra_sites"])
-            goal_domains = [d.strip().lower() for d in extra.split(",") if d.strip()]
         for c in q.get("custom") or []:
             answers[c] = ask(c.rstrip() + " ")
-    if kind == "deep":
-        warn = daily_cap_warning(load_log(cfg.log), cfg.who, minutes)
-        if warn:
-            print(warn)
     session = {
         "who": cfg.who, "start": start_ts, "end": end_ts, "planned_minutes": minutes,
         "goal": goal or "(none given)", "deadline": deadline, "checklist": checklist or "skipped",
-        "dry_run": cfg.dry, "kind": kind,
-        "apps_running": running_apps(cfg) if kind == "deep" else [],
+        "answers": answers, "apps_running": running_apps(cfg),
         "samples_path": os.path.join(cfg.sessions, dt.datetime.fromtimestamp(start_ts).strftime("%Y-%m-%dT%H%M%S") + ".jsonl"),
-        "goal_domains": goal_domains, "breaks": [], "answers": answers,
     }
     write_json(cfg.session, session)
-    if kind == "deep":
-        write_json(cfg.active, {"active": True, "who": cfg.who, "goal": session["goal"], "end": iso(end_ts),
-                                "end_ts": end_ts, "note": "Hold non-urgent updates until end."})
-        for a in cfg.apps:
-            act(cfg, "quit", a)
-        if cfg.conf.get("music_pause"):
-            act(cfg, "music_pause")
-        if cfg.conf["sounds"].get("start"):
-            act(cfg, "sound", cfg.conf["sounds"]["start"])
-        act(cfg, "shortcut", SHORTCUT_ON)
+    for a in cfg.apps:
+        act(cfg, "quit", a)
+    if cfg.conf.get("music_pause"):
+        act(cfg, "music_pause")
+    if cfg.conf["sounds"].get("start"):
+        act(cfg, "sound", cfg.conf["sounds"]["start"])
+    act(cfg, "shortcut", SHORTCUT_ON)
     session["watchdog_pid"] = spawn_watchdog(cfg)
     write_json(cfg.session, session)
-    if kind == "baseline":
-        print("Baseline sampling until %s (%g min). Nothing is blocked or quit. Stop early: deepwork off%s" % (
-            hm(end_ts), minutes, "  [dry run]" if cfg.dry else ""))
-        return
     print("Deep work until %s (%g min). Goal: %s%s" % (hm(end_ts), minutes, session["goal"],
                                                        "  [dry run]" if cfg.dry else ""))
     print('Stray thought? deepwork capture "..."   Stop early: deepwork off')
@@ -312,40 +351,28 @@ def claim_and_restore(cfg, ended_by):
     except FileNotFoundError:
         return False
     s = read_json(cfg.pending) or {}
-    s["ended"] = now()
-    s["ended_by"] = ended_by
+    s.update(ended=now(), ended_by=ended_by)
     write_json(cfg.pending, s)
-    if s.get("kind", "deep") != "deep":
-        return True
-    rm(cfg.active)
     act(cfg, "shortcut", SHORTCUT_OFF)
     for a in s.get("apps_running", cfg.apps):
         act(cfg, "open", a)
     return True
 
 
-def stop_watchdog(cfg, s):
-    pid = (s or {}).get("watchdog_pid")
-    if not pid or pid == os.getpid():
-        return
-    try:
-        os.kill(pid, signal.SIGTERM)
-        for _ in range(30):
-            os.kill(pid, 0)
-            time.sleep(0.1)
-    except (ProcessLookupError, PermissionError):
-        pass
-
-
 def off(cfg, assume_yes):
-    ensure_dirs(cfg)
+    cfg.ensure_dirs()
     s = read_json(cfg.session)
     if s:
-        stop_watchdog(cfg, s)
+        pid = s.get("watchdog_pid")
+        if pid and pid != os.getpid() and pid_alive(pid):
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(30):
+                if not pid_alive(pid):
+                    break
+                time.sleep(0.1)
         claim_and_restore(cfg, "off")
     if not os.path.exists(cfg.pending):
-        print("No session to shut down.")
-        return
+        return print("No session to shut down.")
     shutdown(cfg, assume_yes)
 
 
@@ -366,13 +393,10 @@ def shutdown(cfg, assume_yes):
 
 
 def _shutdown(cfg, assume_yes, s):
-    if s.get("kind") == "baseline":
-        assume_yes = True
     ended = s.get("ended", now())
-    self_count = None
     outcome, done, loops, tomorrow, answers = "unrecorded", "", [], "", dict(s.get("answers") or {})
-    if not assume_yes:
-        q = cfg.conf["shutdown_questions"]
+    q = cfg.conf["shutdown_questions"]
+    if not assume_yes and any(q.values()):
         print("Session over. Goal was: %s" % s.get("goal"))
         if q.get("outcome"):
             outcome = ask(q["outcome"], "n").lower()
@@ -388,70 +412,41 @@ def _shutdown(cfg, assume_yes, s):
                 loops.append(line)
         if q.get("tomorrow"):
             tomorrow = ask(q["tomorrow"])
-        if q.get("task_count"):
-            n = ask(q["task_count"])
-            self_count = int(n) if n.isdigit() else None
         for c in q.get("custom") or []:
             answers[c] = ask(c.rstrip() + " ")
     for line in loops:
         append_capture(cfg, line, "open loop")
-    git = count_commits(cfg, s, ended) if s.get("kind", "deep") == "deep" else None
-    breaks = [[b["start"], b["end"]] for b in s.get("breaks", []) if b["start"] < ended]
+    start_ts = s.get("start", ended)
     rec = {
-        "who": s.get("who", cfg.who), "start": iso(s.get("start", ended)), "end": iso(ended),
-        "minutes": round((ended - s.get("start", ended)) / 60, 1), "planned_minutes": s.get("planned_minutes"),
+        "who": s.get("who", cfg.who), "start": iso(start_ts), "end": iso(ended),
+        "minutes": round((ended - start_ts) / 60, 1), "planned_minutes": s.get("planned_minutes"),
         "goal": s.get("goal"), "deadline": s.get("deadline"), "checklist": s.get("checklist"),
         "outcome": outcome, "done": done, "open_loops": loops, "tomorrow": tomorrow, "answers": answers,
-        "ended_by": s.get("ended_by", "off"), "kind": s.get("kind", "deep"),
-        "activity": summarize(load_log(s["samples_path"]), goal=goal_allowlist(cfg, s.get("goal_domains")),
-                              breaks=breaks) if s.get("samples_path") else None,
-        "breaks": [{"start": iso(b0), "end": iso(min(b1, ended)), "minutes": round((min(b1, ended) - b0) / 60, 1)}
-                   for b0, b1 in breaks],
-        "tasks": {"self": self_count, "git_commits": git},
+        "ended_by": s.get("ended_by", "off"),
+        "activity": summarize(read_jsonl(s["samples_path"])) if s.get("samples_path") else None,
     }
-    rec["tasks"]["used"] = tasks_used(rec["tasks"])
-    with open(cfg.log, "a") as f:
-        f.write(json.dumps(rec) + "\n")
+    rec["id"] = record_id(rec)
+    note = cfg.store.add(rec)
     if rec["activity"]:
         print(session_line(rec))
-        print(experimental_line(rec))
-    if rec["kind"] == "baseline":
-        return print("Baseline logged (%.0f min)." % rec["minutes"])
+    if note:
+        print(note)
     print("Logged %.0f min. Shutdown complete." % rec["minutes"])
 
 
 def append_capture(cfg, text, tag="capture"):
-    ensure_dirs(cfg)
+    cfg.ensure_dirs()
     with open(cfg.capture, "a") as f:
         f.write("- [%s] (%s) %s\n" % (dt.datetime.now().strftime("%Y-%m-%d %H:%M"), tag, text))
-
-
-def watchdog_alive(s):
-    pid = (s or {}).get("watchdog_pid")
-    if not pid:
-        return False
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
-        return False
-    return True
 
 
 def status(cfg):
     s = read_json(cfg.session)
     if not s:
-        if os.path.exists(cfg.pending):
-            print("Session ended; shutdown not done yet. Run: deepwork off")
-        else:
-            print("No deep work session.")
-        return
-    left = max(0, s["end"] - now()) / 60
-    alive = watchdog_alive(s)
-    print("%s until %s (%.0f min left). Goal: %s" % ("Baseline sampling" if s.get("kind") == "baseline" else "Deep work",
-                                                       hm(s["end"]), left, s["goal"]))
-    for b in s.get("breaks", []):
-        if b["end"] > now():
-            print("Break planned %s to %s (experimental)" % (hm(b["start"]), hm(b["end"])))
+        return print("Session ended; shutdown not done yet. Run: deepwork off" if os.path.exists(cfg.pending)
+                     else "No deep work session.")
+    alive = pid_alive(s.get("watchdog_pid"))
+    print("Deep work until %s (%.0f min left). Goal: %s" % (hm(s["end"]), max(0, s["end"] - now()) / 60, s["goal"]))
     print("Deadline: %s   Watchdog: %s   Extension endpoint: %s" % (
         s.get("deadline"), "running" if alive else "DEAD", "up" if endpoint_up(cfg) else "down"))
     if not alive:
@@ -469,45 +464,12 @@ def endpoint_up(cfg):
         return False
 
 
-# ---------- scoreboard ----------
+# ---------- stats ----------
 
-def load_log(path):
-    out = []
-    try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        out.append(json.loads(line))
-                    except ValueError:
-                        pass
-    except FileNotFoundError:
-        pass
-    return out
-
-
-def in_breaks(t, breaks):
-    return any(b0 <= t < b1 for b0, b1 in breaks or [])
-
-
-def on_goal(sample, goal):
-    apps, doms = goal
-    if (sample.get("app") or "").lower() in apps:
-        return True
-    d = sample.get("domain") if sample.get("app") == CHROME else None
-    if not d:
-        return False
-    return any(d == p or (p.startswith("*.") and d.endswith(p[1:])) for p in doms)
-
-
-def summarize(events, every=None, goal=None, breaks=None):
-    """Activity summary for one session from its samples file. Domains only; no titles or content.
-    Samples inside planned breaks are left out."""
-    every = every or SAMPLE_EVERY
-    samples = [e for e in events if e.get("type") == "sample" and not in_breaks(e.get("t", 0), breaks)]
-    if samples and samples[0].get("every"):
-        every = samples[0]["every"]
+def summarize(events):
+    """Activity summary for one session from its samples file. Domains only; no titles or content."""
+    samples = [e for e in events if e.get("type") == "sample"]
+    every = samples[0].get("every", SAMPLE_EVERY) if samples else SAMPLE_EVERY
     n = len(samples)
     hours = n * every / 3600 or 1e-9
     act_n = sum(1 for x in samples if x.get("active"))
@@ -529,208 +491,70 @@ def summarize(events, every=None, goal=None, breaks=None):
         "top_apps": [[a, m(c)] for a, c in apps.most_common(5)],
         "top_domains": [[d, m(c)] for d, c in doms.most_common(5)],
         "blocked_attempts": dict(hits.most_common()),
-        "on_goal_ratio": round(sum(1 for x in samples if on_goal(x, goal)) / n, 2) if (n and goal) else None,
     }
 
 
 def session_line(r):
     a = r.get("activity") or {}
+    when = r["start"][:16].replace("T", " ")
     if not a.get("samples"):
-        return "  %s  %5.0f min  %s  (no activity data)" % (r["start"][:16].replace("T", " "), r.get("minutes") or 0, r.get("goal"))
+        return "  %s  %4.0f min  %s  (no activity data)" % (when, r.get("minutes") or 0, r.get("goal"))
     top = ", ".join("%s %d" % kv for kv in list(a["blocked_attempts"].items())[:3]) or "none"
     return "  %s  %4.0f min  focus %3.0f%%  %4.1f app sw/h  %4.1f site sw/h  longest %4.1f min  blocked: %s  | %s" % (
-        r["start"][:16].replace("T", " "), r.get("minutes") or 0, 100 * (a["focus_ratio"] or 0),
-        a["app_switches_per_h"], a["domain_switches_per_h"], a["longest_active_min"], top, r.get("goal"))
+        when, r.get("minutes") or 0, 100 * (a["focus_ratio"] or 0), a["app_switches_per_h"],
+        a["domain_switches_per_h"], a["longest_active_min"], top, r.get("goal"))
 
 
-def aggregate(recs):
+def week_line(recs):
     acts = [r["activity"] for r in recs if (r.get("activity") or {}).get("samples")]
     if not acts:
-        return None
-    hours = sum(a["samples"] * a["sample_every_s"] for a in acts) / 3600 or 1e-9
+        return "Week: no activity data yet"
+    weight = lambda a: a["samples"] * a["sample_every_s"] / 3600
+    hours = sum(weight(a) for a in acts) or 1e-9
     hits = collections.Counter()
     for a in acts:
         hits.update(a["blocked_attempts"])
-    return {
-        "focus_ratio": sum(a["active_min"] for a in acts) / (sum(a["active_min"] + a["idle_min"] for a in acts) or 1e-9),
-        "app_sw_h": sum(a["app_switches_per_h"] * a["samples"] * a["sample_every_s"] / 3600 for a in acts) / hours,
-        "dom_sw_h": sum(a["domain_switches_per_h"] * a["samples"] * a["sample_every_s"] / 3600 for a in acts) / hours,
-        "longest": max(a["longest_active_min"] for a in acts),
-        "hits": hits.most_common(5),
-    }
+    focus = sum(a["active_min"] for a in acts) / (sum(a["active_min"] + a["idle_min"] for a in acts) or 1e-9)
+    return "Week: focus %.0f%%, %.1f app switches/h, %.1f site switches/h, longest stretch %.1f min, top attempts: %s" % (
+        100 * focus, sum(a["app_switches_per_h"] * weight(a) for a in acts) / hours,
+        sum(a["domain_switches_per_h"] * weight(a) for a in acts) / hours,
+        max(a["longest_active_min"] for a in acts), ", ".join("%s %d" % kv for kv in hits.most_common(5)) or "none")
 
 
-def agg_line(label, g):
-    if not g:
-        return "%s: no activity data yet" % label
-    return "%s: focus %.0f%%, %.1f app switches/h, %.1f site switches/h, longest stretch %.1f min, top attempts: %s" % (
-        label, 100 * g["focus_ratio"], g["app_sw_h"], g["dom_sw_h"], g["longest"],
-        ", ".join("%s %d" % kv for kv in g["hits"]) or "none")
-
-
-def score_report(records, who=None, today=None):
+def stats_report(records, who=None, today=None):
     today = today or dt.date.today()
     monday = today - dt.timedelta(days=today.weekday())
     day_m = week_m = 0.0
-    per_goal = {}
-    week_deep, week_base = [], []
+    per_goal = collections.Counter()
+    week = []
     for r in records:
-        if who and r.get("who") != who:
+        if (who and r.get("who") != who) or r.get("kind", "deep") != "deep":  # older logs also hold baselines
             continue
         d = dt.datetime.fromisoformat(r["start"]).date()
-        if r.get("kind") == "baseline":
-            if monday <= d <= today:
-                week_base.append(r)
-            continue
         m = float(r.get("minutes") or 0)
         if d == today:
             day_m += m
         if monday <= d <= today:
             week_m += m
-            week_deep.append(r)
-            per_goal[r.get("goal") or "(none)"] = per_goal.get(r.get("goal") or "(none)", 0) + m
+            week.append(r)
+            per_goal[r.get("goal") or "(none)"] += m
     lines = ["Deep hours today:     %.1f" % (day_m / 60),
              "Deep hours this week: %.1f  (since Mon %s)" % (week_m / 60, monday.isoformat())]
     if per_goal:
         lines.append("Per goal this week:")
-        for g, m in sorted(per_goal.items(), key=lambda kv: -kv[1]):
-            lines.append("  %5.1f h  %s" % (m / 60, g))
-    if week_deep:
+        lines += ["  %5.1f h  %s" % (m / 60, g) for g, m in per_goal.most_common()]
+    if week:
         lines.append("Sessions this week:")
-        lines += [session_line(r) for r in week_deep]
-        lines.append(agg_line("Week, deep work", aggregate(week_deep)))
-    if week_base:
-        lines.append(agg_line("Week, baseline", aggregate(week_base)))
-    if week_deep:
-        lines.append("Experimental:")
-        lines += [experimental_line(r) for r in week_deep]
-        lines += experimental_week(week_deep)
+        lines += [session_line(r) for r in week]
+        lines.append(week_line(week))
     return "\n".join(lines)
 
 
-def score(cfg, everyone):
-    print(score_report(load_log(cfg.log), None if everyone else cfg.who))
+def stats(cfg, everyone):
+    print(stats_report(cfg.store.records(), None if everyone else cfg.who))
     s = read_json(cfg.session)
     if s:
         print("(in progress: %.0f min so far, not counted yet)" % ((now() - s["start"]) / 60))
-
-
-# ---------- experimental metrics ----------
-
-def tasks_used(t):
-    """Tasks for the tasks-per-hour metric: his own count when given, else n/a."""
-    if t.get("self") is not None:
-        return {"n": t["self"], "source": "self"}
-    return None  # git commits are recorded only: agents commit under his name
-
-
-def experimental_line(r):
-    a = r.get("activity") or {}
-    used = (r.get("tasks") or {}).get("used")
-    hours = (r.get("minutes") or 0) / 60
-    tasks = "tasks n/a" if not used else "tasks %d (%s) = %.1f/deep h" % (
-        used["n"], used["source"], used["n"] / hours if hours else 0)
-    goal = "on goal n/a" if a.get("on_goal_ratio") is None else "on goal %.0f%%" % (100 * a["on_goal_ratio"])
-    br = r.get("breaks") or []
-    pulls = sum((a.get("blocked_attempts") or {}).values())
-    commits = (r.get("tasks") or {}).get("git_commits")
-    return "  %s  %s, %s, outcome %s, breaks %d (%.0f min) vs %d blocked pulls, commits (mostly agents) %s" % (
-        r["start"][:16].replace("T", " "), tasks, goal, r.get("outcome"), len(br),
-        sum(b["minutes"] for b in br), pulls, "n/a" if commits is None else commits)
-
-
-def experimental_week(recs):
-    hours = sum((r.get("minutes") or 0) for r in recs) / 60
-    used = [r["tasks"]["used"] for r in recs if (r.get("tasks") or {}).get("used")]
-    t_hours = sum((r.get("minutes") or 0) for r in recs if (r.get("tasks") or {}).get("used")) / 60
-    out = []
-    out.append("  Week: tasks per deep hour %s" % ("%.1f (%d tasks over %.1f h)" % (
-        sum(u["n"] for u in used) / t_hours, sum(u["n"] for u in used), t_hours) if t_hours else "n/a"))
-    goals = [r["activity"]["on_goal_ratio"] for r in recs if (r.get("activity") or {}).get("on_goal_ratio") is not None]
-    out.append("  Week: time on goal %s" % ("%.0f%%" % (100 * sum(goals) / len(goals)) if goals else "n/a"))
-    rated = [r.get("outcome") for r in recs if r.get("outcome") in ("done", "partial", "not done")]
-    out.append("  Week: goal hit rate %s" % ("%d of %d done, %d partial" % (
-        rated.count("done"), len(rated), rated.count("partial")) if rated else "n/a"))
-    nb = sum(len(r.get("breaks") or []) for r in recs)
-    pulls = sum(sum(((r.get("activity") or {}).get("blocked_attempts") or {}).values()) for r in recs)
-    out.append("  Week: %d planned breaks vs %d blocked-site pulls (%.1f pulls per deep hour)" % (
-        nb, pulls, pulls / hours if hours else 0))
-    return out
-
-
-def goal_allowlist(cfg, extra=None):
-    g = read_json(cfg.goal_apps) or {}
-    return ({a.lower() for a in g.get("apps", [])}, [d.lower() for d in g.get("domains", [])] + list(extra or []))
-
-
-def daily_cap_warning(records, who, minutes, today=None):
-    today = today or dt.date.today()
-    done = sum(float(r.get("minutes") or 0) for r in records
-               if r.get("who") == who and r.get("kind", "deep") == "deep"
-               and dt.datetime.fromisoformat(r["start"]).date() == today)
-    if done + minutes <= DAILY_CAP_MIN:
-        return None
-    left = max(0, DAILY_CAP_MIN - done)
-    tip = ("You are already at the cap; consider stopping for today." if left == 0 else
-           "Consider two blocks: %.0f min now, then the rest after a real break or tomorrow." % left)
-    return "Heads up (experimental): this takes today to %.0f deep min, past the %d min cap. %s" % (
-        done + minutes, DAILY_CAP_MIN, tip)
-
-
-def git_repos(root):
-    out = subprocess.run(["find", root, "-maxdepth", "3", "-name", "node_modules", "-prune", "-o",
-                          "-name", ".git", "-print"], capture_output=True, text=True, timeout=30).stdout
-    return sorted({os.path.dirname(p) for p in out.splitlines() if p})
-
-
-def git_commits(root, author, since, until):
-    hashes = set()
-    for repo in git_repos(root):
-        r = subprocess.run(["git", "-C", repo, "log", "--all", "--regexp-ignore-case", "--author=" + author,
-                            "--since=" + iso(since), "--until=" + iso(until), "--format=%H%x00%b%x1e"],
-                           capture_output=True, text=True, timeout=30)
-        for entry in r.stdout.split("\x1e"):
-            h, _, body = entry.strip().partition("\x00")
-            # Agent-made commits (Claude or Codex co-author trailers) are not his finished tasks.
-            if h and not AGENT_TRAILER.search(body):
-                hashes.add(h)
-    return len(hashes)
-
-
-AGENT_TRAILER = re.compile(r"co-authored-by:.*(claude|codex|anthropic|openai)", re.I)
-
-
-def count_commits(cfg, s, ended):
-    try:
-        return git_commits(cfg.git_root, os.environ.get("DEEPWORK_GIT_AUTHOR", cfg.who), s["start"], ended)
-    except Exception:
-        return None
-
-
-# ---------- breaks (experimental) ----------
-
-def plan_break(cfg, minutes):
-    s = read_json(cfg.session)
-    if not s or s.get("kind", "deep") != "deep":
-        sys.exit("No deep work session running.")
-    t = now()
-    if any(b["end"] > t for b in s.get("breaks", [])):
-        sys.exit("A break is already planned. See: deepwork status")
-    b0 = t + cfg.break_delay
-    if b0 >= s["end"]:
-        sys.exit("The session ends at %s, before a break could start. Keep going." % hm(s["end"]))
-    b1 = min(b0 + minutes * 60, s["end"])
-    s.setdefault("breaks", []).append({"requested": t, "start": b0, "end": b1})
-    write_json(cfg.session, s)
-    print("Break planned %s to %s (experimental). Keep working until then; blocking comes back after." % (hm(b0), hm(b1)))
-
-
-def current_break(s, t=None):
-    t = now() if t is None else t
-    for b in (s or {}).get("breaks", []):
-        if b["start"] <= t < b["end"]:
-            return b
-    return None
 
 
 # ---------- activity sampling (no permissions needed) ----------
@@ -748,6 +572,12 @@ def front_app():
     out = subprocess.run(["lsappinfo", "info", "-only", "name", asn], capture_output=True, text=True, timeout=10).stdout
     m = re.search(r'"LSDisplayName"="(.*)"', out)
     return m.group(1) if m else None
+
+
+def clean_domain(d):
+    """Keep only a hostname, never a path or query."""
+    d = str(d or "").strip().lower()
+    return d if re.fullmatch(r"[a-z0-9.-]{1,253}", d) else None
 
 
 class Recorder:
@@ -785,12 +615,6 @@ class Recorder:
                     "domain": self.domain if app == CHROME else None})
 
 
-def clean_domain(d):
-    """Keep only a hostname, never a path or query."""
-    d = str(d or "").strip().lower()
-    return d if re.fullmatch(r"[a-z0-9.-]{1,253}", d) else None
-
-
 # ---------- watchdog ----------
 
 def spawn_watchdog(cfg):
@@ -824,12 +648,9 @@ def serve_state(cfg, rec):
         def do_GET(self):
             s = read_json(cfg.session)
             running = bool(s) and now() < s["end"]
-            brk = current_break(s) if running else None
-            active = running and s.get("kind", "deep") == "deep" and not brk
-            body = json.dumps({"active": active, "sampling": running, "on_break": bool(brk),
-                               "break_end": brk["end"] if brk else None, "goal": s.get("goal") if running else None,
-                               "end_ts": s.get("end") if running else None}).encode()
-            self.reply(body)
+            self.reply(json.dumps({"active": running, "sampling": running,
+                                   "goal": s.get("goal") if running else None,
+                                   "end_ts": s.get("end") if running else None}).encode())
 
         def do_POST(self):
             # The custom header forces a CORS preflight, which this server never approves,
@@ -866,8 +687,7 @@ def serve_state(cfg, rec):
     try:
         srv = S(("127.0.0.1", cfg.port), H)
     except OSError as e:
-        print("%s endpoint not started on port %d: %s" % (iso(now()), cfg.port, e), flush=True)
-        return
+        return print("%s endpoint not started on port %d: %s" % (iso(now()), cfg.port, e), flush=True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
 
 
@@ -885,42 +705,23 @@ def watchdog(cfg):
     serve_state(cfg, rec)
     if cfg.tracking:
         threading.Thread(target=sampler, args=(cfg, rec), daemon=True).start()
-    deep = s0.get("kind", "deep") == "deep"
-    halfway = s0.get("start", 0) + (s0.get("end", 0) - s0.get("start", 0)) / 2
-    walk_due = deep and s0.get("planned_minutes", 0) > HALFWAY_WALK_OVER_MIN and now() < halfway + 60
-    on_break = None
     while True:
         s = read_json(cfg.session)
         if not s:
             return
         if now() >= s["end"]:
             if claim_and_restore(cfg, "timer"):
-                if deep:
-                    act(cfg, "notify", "Time is up: %s. Run deepwork off for the shutdown." % s.get("goal"))
-                    act(cfg, "terminal", shutdown_command(cfg))
-                else:
-                    shutdown(cfg, True)
-                    act(cfg, "notify", "Baseline sampling finished. See: deepwork stats")
+                act(cfg, "notify", "Time is up: %s. Run deepwork off for the shutdown." % s.get("goal"))
+                act(cfg, "terminal", shutdown_command(cfg))
             return
-        brk = current_break(s)
-        if brk and not on_break:
-            act(cfg, "notify", "Planned break until %s. Step away from the screen." % hm(brk["end"]))
-        elif on_break and not brk:
-            act(cfg, "notify", "Break over. Blocking is back on.")
-        on_break = brk
-        if walk_due and now() >= halfway:
-            walk_due = False
-            act(cfg, "notify", "Halfway. Take a short walk away from the screen, no phone. Think about the goal.")
-        if deep and not brk:
-            for a in cfg.apps:
-                act(cfg, "quit", a)
+        for a in cfg.apps:
+            act(cfg, "quit", a)
         time.sleep(min(REQUIT_EVERY, max(0.2, s["end"] - now())))
 
 
 # ---------- CLI ----------
 
 def edit_config(cfg):
-    """Open the settings file in $VISUAL/$EDITOR (else nvim, vim, vi); write the defaults first if missing."""
     if not os.path.exists(cfg.config):
         os.makedirs(os.path.dirname(cfg.config), exist_ok=True)
         write_json(cfg.config, cfg.conf)
@@ -936,22 +737,19 @@ def edit_config(cfg):
             if not yes("That isn't valid JSON (%s). Edit again?" % e):
                 return print("Left as is; deepwork uses the defaults until it parses.")
 
+
 def main(argv):
-    dry = "--dry-run" in argv
-    assume_yes = "-y" in argv or "--yes" in argv
-    everyone = "--all" in argv
-    goal = None
-    rest = []
-    i = 0
+    flags = {"--dry-run", "-y", "--yes", "--all"}
+    goal, rest, i = None, [], 0
     while i < len(argv):
-        a = argv[i]
-        if a in ("-g", "--goal") and i + 1 < len(argv):
+        if argv[i] in ("-g", "--goal") and i + 1 < len(argv):
             goal = argv[i + 1]
             i += 2
             continue
-        if a not in ("--dry-run", "-y", "--yes", "--all"):
-            rest.append(a)
+        if argv[i] not in flags:
+            rest.append(argv[i])
         i += 1
+    dry, assume_yes = "--dry-run" in argv, "-y" in argv or "--yes" in argv
     cfg = Cfg(dry)
     cmd = rest[0] if rest else str(DEFAULT_MIN)
     if cmd == "_watchdog":
@@ -961,20 +759,20 @@ def main(argv):
     if cmd == "status":
         return status(cfg)
     if cmd in ("stats", "score"):
-        return score(cfg, everyone)
+        return stats(cfg, "--all" in argv)
     if cmd == "capture":
         text = " ".join(rest[1:]).strip()
         if not text:
             sys.exit('usage: deepwork capture "<thought>"')
         append_capture(cfg, text)
         return print("Captured.")
-    if cmd == "break":
-        return plan_break(cfg, float(rest[1]) if len(rest) > 1 else 10)
-    if cmd == "baseline":
-        minutes = float(rest[1]) if len(rest) > 1 else 60
-        if minutes <= 0 or (minutes < 1 and not dry):
-            sys.exit("minutes must be at least 1")
-        return start(cfg, minutes, True, goal, kind="baseline")
+    if cmd == "sync":
+        if not cfg.database_url:
+            sys.exit('No database set. Add "database_url": "postgres://..." with: deepwork questions')
+        try:
+            return print("Synced %d session(s) to the database." % cfg.store.sync())
+        except Exception as e:
+            sys.exit("Sync failed: %s" % e)
     if cmd in ("questions", "edit"):
         return edit_config(cfg)
     if cmd == "config":

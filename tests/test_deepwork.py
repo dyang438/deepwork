@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,16 +50,13 @@ class Base(unittest.TestCase):
 
 class TestFlow(Base):
     def test_start_prompts_endpoint_off_and_log(self):
-        r = self.run_cli("60", stdin="Write pilot scope doc\n12:30\ny\ny\nn\nnotion.so, arxiv.org\n")
+        r = self.run_cli("60", stdin="Write pilot scope doc\n12:30\ny\ny\nn\n")
         self.assertEqual(r.returncode, 0, r.stderr)
         s = json.load(open(self.path("state", "session.json")))
         self.assertEqual(s["goal"], "Write pilot scope doc")
         self.assertEqual(s["deadline"], "12:30")
         self.assertEqual(s["checklist"], {"water or coffee": True, "phone in another room": True, "materials open": False})
         self.assertNotIn("food", s["checklist"])  # food only asked when over 90 min
-        self.assertEqual(s["goal_domains"], ["notion.so", "arxiv.org"])
-        active = json.load(open(self.path("state", "active.json")))
-        self.assertEqual(active["goal"], "Write pilot scope doc")
         acts = open(self.path("state", "actions.log")).read()
         for a in ("quit Slack", "quit Shortwave", "quit Messages", "quit Mail", "shortcut deepwork-on"):
             self.assertIn(a, acts)
@@ -69,24 +67,22 @@ class TestFlow(Base):
         self.assertIn("running", self.run_cli("status").stdout)
         self.assertIn("already running", self.run_cli("30", "-y").stderr)
 
-        r = self.run_cli("off", stdin="partial\nDrafted sections 1-2\nemail Raoul\nfix grader\n\nPilot doc 9-11am\n3\n")
+        r = self.run_cli("off", stdin="partial\nDrafted sections 1-2\nemail the team\nfix grader\n\nPilot doc 9-11am\n")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Shutdown complete.", r.stdout)
-        self.assertFalse(os.path.exists(self.path("state", "active.json")))
         self.assertFalse(os.path.exists(self.path("state", "session.json")))
         rec = json.loads(open(self.env["DEEPWORK_LOG"]).read().strip())
         self.assertEqual((rec["who"], rec["outcome"], rec["goal"], rec["ended_by"]),
                          ("tester", "partial", "Write pilot scope doc", "off"))
         self.assertEqual(rec["tomorrow"], "Pilot doc 9-11am")
-        self.assertEqual(rec["tasks"]["used"], {"n": 3, "source": "self"})
         cap = open(self.env["DEEPWORK_CAPTURE"]).read()
-        self.assertIn("(open loop) email Raoul", cap)
+        self.assertIn("(open loop) email the team", cap)
         self.assertIn("(open loop) fix grader", cap)
         acts = open(self.path("state", "actions.log")).read()
         self.assertIn("shortcut deepwork-off", acts)
         self.assertIn("open Slack", acts)
         time.sleep(0.5)
-        self.assertFalse(dw.watchdog_alive(s))
+        self.assertFalse(dw.pid_alive(s["watchdog_pid"]))
         with self.assertRaises(Exception):
             urllib.request.urlopen("http://127.0.0.1:%s/state" % self.env["DEEPWORK_PORT"], timeout=1)
 
@@ -100,7 +96,6 @@ class TestFlow(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         time.sleep(5)
         self.assertFalse(os.path.exists(self.path("state", "session.json")))
-        self.assertFalse(os.path.exists(self.path("state", "active.json")))
         self.assertTrue(os.path.exists(self.path("state", "pending.json")))
         acts = open(self.path("state", "actions.log")).read()
         self.assertIn("notify", acts)
@@ -110,7 +105,7 @@ class TestFlow(Base):
         body = open(cmd).read()
         self.assertTrue(body.startswith("#!/bin/zsh"))
         self.assertIn("deepwork' off --dry-run", body)
-        self.assertNotIn("osascript", open(CLI).read().split("def shortcut_names")[0].split('kind == "terminal"')[1].split("elif")[0])
+        self.assertNotIn("osascript", open(CLI).read().split('kind == "terminal"')[1].split("except")[0])
         self.assertIn("shortcut deepwork-off", acts)
         self.assertIn("shutdown not done", self.run_cli("status").stdout)
         r = self.run_cli("off", stdin="y\nshipped\n\ntomorrow 9am\n")
@@ -124,19 +119,19 @@ class TestFlow(Base):
         s = json.load(open(self.path("state", "session.json")))
         os.utime(CLI)  # v1 caveat: editing the script killed the watchdog; v2's runs from memory
         time.sleep(3.5)
-        self.assertTrue(dw.watchdog_alive(s))
+        self.assertTrue(dw.pid_alive(s["watchdog_pid"]))
         os.kill(s["watchdog_pid"], 9)
         time.sleep(0.3)
         out = self.run_cli("status").stdout
         self.assertIn("Restarted the watchdog", out)
         s2 = json.load(open(self.path("state", "session.json")))
-        self.assertTrue(dw.watchdog_alive(s2))
+        self.assertTrue(dw.pid_alive(s2["watchdog_pid"]))
         self.run_cli("off", "-y")
 
     def test_capture(self):
-        r = self.run_cli("capture", "look", "into", "Voyager", "limits")
+        r = self.run_cli("capture", "look", "into", "rate", "limits")
         self.assertIn("Captured", r.stdout)
-        self.assertRegex(open(self.env["DEEPWORK_CAPTURE"]).read(), r"\(capture\) look into Voyager limits")
+        self.assertRegex(open(self.env["DEEPWORK_CAPTURE"]).read(), r"\(capture\) look into rate limits")
 
     def test_two_shutdowns_after_timer_do_not_crash(self):
         self.run_cli("0.03", "-y", "-g", "race")
@@ -149,7 +144,7 @@ class TestFlow(Base):
         outs = [p.communicate(timeout=30) for p in (p1, p2)]
         self.assertEqual([p1.returncode, p2.returncode], [0, 0], outs)
         self.assertNotIn("Traceback", "".join(o[1] for o in outs))
-        self.assertEqual(len(dw.load_log(self.env["DEEPWORK_LOG"])), 1)  # logged exactly once
+        self.assertEqual(len(dw.read_jsonl(self.env["DEEPWORK_LOG"])), 1)  # logged exactly once
         r = self.run_cli("off", "-y")  # pending already gone: tolerated
         self.assertEqual(r.returncode, 0, r.stderr)
 
@@ -180,8 +175,8 @@ class TestActivity(Base):
             self.post("/hit", {"domain": "evil.com"}, header=False)
         time.sleep(2.5)
         s = json.load(open(self.path("state", "session.json")))
-        evs = dw.load_log(s["samples_path"])
-        self.assertTrue(s["samples_path"].startswith(self.path("sessions")))
+        evs = dw.read_jsonl(s["samples_path"])
+        self.assertTrue(s["samples_path"].startswith(self.path("state", "sessions")))
         self.assertGreaterEqual(len([e for e in evs if e["type"] == "sample"]), 2)
         self.assertNotIn("secret", open(s["samples_path"]).read())
         self.assertEqual([e["domain"] for e in evs if e["type"] == "tab"], ["github.com", "docs.google.com"])
@@ -192,113 +187,6 @@ class TestActivity(Base):
         self.assertEqual(a["domain_switches_per_h"] > 0, True)
         self.assertIn("focus", r.stdout)
         self.assertIn("Sessions this week", self.run_cli("stats").stdout)
-
-    def test_baseline_samples_without_blocking(self):
-        r = self.run_cli("baseline", "0.05")
-        self.assertIn("Nothing is blocked", r.stdout)
-        time.sleep(0.8)
-        st = json.load(urllib.request.urlopen("http://127.0.0.1:%s/state" % self.env["DEEPWORK_PORT"], timeout=2))
-        self.assertEqual((st["active"], st["sampling"]), (False, True))
-        self.assertFalse(os.path.exists(self.path("state", "active.json")))  # no agent hold
-        time.sleep(4.5)
-        acts = open(self.path("state", "actions.log")).read()
-        self.assertNotIn("quit", acts)
-        self.assertNotIn("shortcut", acts)
-        rec = json.loads(open(self.env["DEEPWORK_LOG"]).read().strip())
-        self.assertEqual((rec["kind"], rec["ended_by"]), ("baseline", "timer"))
-        self.assertGreater(rec["activity"]["samples"], 0)
-        out = self.run_cli("stats").stdout
-        self.assertIn("Week, baseline", out)
-        self.assertIn("Deep hours today:     0.0", out)  # baseline is not deep time
-
-
-class TestExperimental(Base):
-    def test_break_starts_after_delay_unblocks_then_resumes(self):
-        self.run_cli("1", "-y", "-g", "breaks")
-        time.sleep(0.8)
-        t0 = time.time()
-        r = self.run_cli("break", "0.05")  # 3 s break, test delay 2 s (real minimum is 5 min)
-        self.assertIn("Break planned", r.stdout)
-        self.assertIn("already planned", self.run_cli("break").stderr)
-        b = json.load(open(self.path("state", "session.json")))["breaks"][0]
-        self.assertGreaterEqual(b["start"] - b["requested"], 2)
-        self.assertAlmostEqual(b["end"] - b["start"], 3, delta=0.1)
-        url = "http://127.0.0.1:%s/state" % self.env["DEEPWORK_PORT"]
-        self.assertTrue(json.load(urllib.request.urlopen(url))["active"])  # still blocked before the break
-        time.sleep(max(0, b["start"] - time.time()) + 0.3)
-        st = json.load(urllib.request.urlopen(url))
-        self.assertEqual((st["active"], st["on_break"], st["sampling"]), (False, True, True))
-        time.sleep(1.0)
-        n_quits_in_break = open(self.path("state", "actions.log")).read().count("quit")
-        time.sleep(1.0)
-        self.assertEqual(open(self.path("state", "actions.log")).read().count("quit"), n_quits_in_break)  # no re-quits
-        time.sleep(max(0, b["end"] - time.time()) + 3.5)
-        self.assertTrue(json.load(urllib.request.urlopen(url))["active"])  # blocking back
-        acts = open(self.path("state", "actions.log")).read()
-        self.assertIn("Planned break until", acts)
-        self.assertIn("Break over", acts)
-        self.assertGreater(acts.count("quit"), n_quits_in_break)
-        self.run_cli("off", "-y")
-        rec = json.loads(open(self.env["DEEPWORK_LOG"]).read().strip())
-        self.assertEqual(len(rec["breaks"]), 1)
-        self.assertLessEqual(rec["breaks"][0]["minutes"], 0.1)  # 3 s, rounded to 0.1 min
-        self.assertIn("planned breaks vs", self.run_cli("stats").stdout)
-
-    def test_break_never_instant_in_real_mode(self):
-        cfg = dw.Cfg(False)
-        self.assertGreaterEqual(cfg.break_delay, 300)
-
-    def test_break_refused_when_session_ends_first(self):
-        self.env["DEEPWORK_BREAK_DELAY"] = "120"
-        self.run_cli("1", "-y")
-        self.assertIn("before a break could start", self.run_cli("break").stderr)
-        self.run_cli("off", "-y")
-
-    def test_halfway_walk_only_over_90(self):
-        self.run_cli("91", "-y")
-        s = json.load(open(self.path("state", "session.json")))
-        s["start"] -= 46 * 60
-        s["end"] -= 46 * 60
-        dw.write_json(self.path("state", "session.json"), s)
-        self.run_cli("status")  # nothing restarts; the live watchdog read start from the first session file
-        dw.os.kill(s["watchdog_pid"], 9)
-        self.run_cli("status")  # respawn picks up the shifted halfway point
-        time.sleep(1.5)
-        self.assertIn("Halfway. Take a short walk", open(self.path("state", "actions.log")).read())
-        self.run_cli("off", "-y")
-
-    def test_git_commits_counted(self):
-        repo = os.path.join(self.env["DEEPWORK_GIT_ROOT"], "proj")
-        subprocess.run(["git", "init", "-q", repo], check=True)
-        self.run_cli("10", "-y", "-g", "ship it")
-        genv = dict(self.env, GIT_AUTHOR_NAME="Tester", GIT_AUTHOR_EMAIL="t@x", GIT_COMMITTER_NAME="T",
-                    GIT_COMMITTER_EMAIL="t@x")
-        for i in range(2):
-            subprocess.run(["git", "-C", repo, "commit", "-q", "--allow-empty", "-m", "c%d" % i], env=genv, check=True)
-        subprocess.run(["git", "-C", repo, "commit", "-q", "--allow-empty", "-m",
-                        "agent\n\nCo-Authored-By: Claude Opus <noreply@anthropic.com>"], env=genv, check=True)
-        genv["GIT_AUTHOR_NAME"] = "David"
-        subprocess.run(["git", "-C", repo, "commit", "-q", "--allow-empty", "-m", "d"], env=genv, check=True)
-        time.sleep(1.1)
-        self.run_cli("off", "-y")
-        rec = json.loads(open(self.env["DEEPWORK_LOG"]).read().strip())
-        self.assertEqual(rec["tasks"]["git_commits"], 2)
-        self.assertIsNone(rec["tasks"]["used"])  # commits never count
-        self.assertIn("commits (mostly agents) 2", self.run_cli("stats").stdout)
-
-    def test_daily_cap_warning(self):
-        today = dt.date(2026, 10, 15)
-        recs = [{"who": "p", "start": "2026-10-15T09:00:00", "minutes": 180},
-                {"who": "p", "start": "2026-10-15T07:00:00", "minutes": 30, "kind": "baseline"},
-                {"who": "d", "start": "2026-10-15T09:00:00", "minutes": 300}]
-        self.assertIsNone(dw.daily_cap_warning(recs, "p", 60, today))
-        w = dw.daily_cap_warning(recs, "p", 90, today)
-        self.assertIn("270", w)
-        self.assertIn("two blocks: 60 min now", w)
-        r = self.run_cli("250", "-y")
-        self.assertIn("past the 240 min cap", r.stdout)
-        self.run_cli("off", "-y")
-
 
 class TestSummarize(unittest.TestCase):
     def test_summary_math(self):
@@ -321,58 +209,74 @@ class TestSummarize(unittest.TestCase):
         self.assertEqual(a["blocked_attempts"], {"www.youtube.com": 3, "x.com": 1})
         self.assertIn("focus  91%", dw.session_line({"start": "2026-10-15T10:00:00", "minutes": 4, "goal": "g", "activity": a}))
 
-    def test_on_goal_and_breaks(self):
-        goal = ({"cursor", "terminal"}, ["github.com", "*.example.com", "notion.so"])
-        evs = [{"type": "sample", "t": i, "every": 10, "active": True, "app": app, "domain": dom}
-               for i, (app, dom) in enumerate([("Cursor", None), ("Google Chrome", "github.com"),
-                                               ("Google Chrome", "docs.example.com"), ("Google Chrome", "example.com"),
-                                               ("Google Chrome", "x.com"), ("Slack", None), ("Google Chrome", "notion.so"),
-                                               ("Terminal", None)])]
-        a = dw.summarize(evs, goal=goal)
-        self.assertEqual(a["on_goal_ratio"], round(5 / 8, 2))  # bare example.com is not in this list
-        a = dw.summarize(evs, goal=goal, breaks=[[4, 6]])  # samples at t=4,5 fall in a break
-        self.assertEqual(a["samples"], 6)
-        self.assertEqual(a["on_goal_ratio"], round(5 / 6, 2))
-
-    def test_tasks_used_sources(self):
-        self.assertEqual(dw.tasks_used({"self": 2, "git_commits": 9}), {"n": 2, "source": "self"})
-        self.assertIsNone(dw.tasks_used({"self": None, "git_commits": 9}))
-        self.assertIn("tasks n/a", dw.experimental_line({"start": "2026-10-15T10:00", "minutes": 60,
-                                                         "tasks": {"used": None, "git_commits": 9}}))
-
-    def test_experimental_week(self):
-        def r(m, outcome, used, hits=0, breaks=0):
-            return {"start": "2026-10-15T10:00:00", "minutes": m, "outcome": outcome,
-                    "tasks": {"used": used}, "breaks": [{"minutes": 10}] * breaks,
-                    "activity": {"on_goal_ratio": 0.5, "blocked_attempts": {"x.com": hits}}}
-        out = "\n".join(dw.experimental_week([r(60, "done", {"n": 3, "source": "self"}, 4, 1),
-                                               r(60, "partial", {"n": 1, "source": "self"}),
-                                               r(60, "not done", None)]))
-        self.assertIn("tasks per deep hour 2.0 (4 tasks over 2.0 h)", out)
-        self.assertIn("time on goal 50%", out)
-        self.assertIn("1 of 3 done, 1 partial", out)
-        self.assertIn("1 planned breaks vs 4 blocked-site pulls", out)
-
     def test_clean_domain(self):
         self.assertEqual(dw.clean_domain("Mail.Google.com"), "mail.google.com")
         self.assertIsNone(dw.clean_domain("x.com/home"))
         self.assertIsNone(dw.clean_domain("a b"))
 
 
-class TestScore(unittest.TestCase):
-    def test_score_report(self):
+class TestStats(unittest.TestCase):
+    def test_stats_report(self):
         today = dt.date(2026, 10, 15)  # Thursday
         def rec(day, m, goal, who="phillip"):
             return {"who": who, "start": "%sT10:00:00-07:00" % day, "minutes": m, "goal": goal}
         recs = [rec("2026-10-15", 90, "pilot doc"), rec("2026-10-15", 30, "grader"),
                 rec("2026-10-13", 60, "pilot doc"), rec("2026-10-11", 600, "old week"),
-                rec("2026-10-15", 120, "david thing", who="david")]
-        out = dw.score_report(recs, "phillip", today)
+                rec("2026-10-15", 120, "david thing", who="david"),
+                dict(rec("2026-10-15", 45, "old baseline"), kind="baseline")]
+        out = dw.stats_report(recs, "phillip", today)
         self.assertIn("today:     2.0", out)
         self.assertIn("this week: 3.0", out)
         self.assertIn("2.5 h  pilot doc", out)
         self.assertNotIn("old week", out)
-        self.assertIn("this week: 5.0", dw.score_report(recs, None, today))
+        self.assertNotIn("old baseline", out)
+        self.assertIn("this week: 5.0", dw.stats_report(recs, None, today))
+
+
+class TestStore(Base):
+    def test_local_only_by_default(self):
+        self.assertIsNone(dw.Cfg(True).database_url)
+        self.run_cli("10", "-y", "-g", "local")
+        r = self.run_cli("off", "-y")
+        self.assertNotIn("database", r.stdout.lower())
+        self.assertIn("No database set", self.run_cli("sync").stderr)
+
+    def test_unreachable_database_keeps_local_log(self):
+        self.env["DEEPWORK_DATABASE_URL"] = "postgresql://nobody@127.0.0.1:1/none?connect_timeout=2"
+        self.run_cli("10", "-y", "-g", "offline")
+        r = self.run_cli("off", "-y")
+        self.assertIn("saved locally", r.stdout)
+        self.assertEqual(dw.read_jsonl(self.env["DEEPWORK_LOG"])[0]["goal"], "offline")
+        r = self.run_cli("stats")
+        self.assertIn("showing the local log", r.stderr)
+        self.assertIn("offline", r.stdout)
+
+    @unittest.skipUnless(shutil.which("initdb") and shutil.which("pg_ctl") and shutil.which("psql"), "no local Postgres")
+    def test_postgres_mirror(self):
+        data, sock = self.path("pg"), tempfile.mkdtemp(prefix="dwpg")
+        subprocess.run(["initdb", "-D", data, "-U", "dw", "--auth=trust"], check=True, capture_output=True)
+        port = str(55000 + os.getpid() % 1000)
+        # Postgres inherits pg_ctl's output, so capturing it would wait forever: log to a file instead.
+        subprocess.run(["pg_ctl", "-D", data, "-w", "-l", self.path("pg.log"), "-o",
+                        "-p %s -k %s -c listen_addresses=''" % (port, sock), "start"],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(subprocess.run, ["pg_ctl", "-D", data, "-m", "immediate", "stop"], capture_output=True)
+        self.env["DEEPWORK_DATABASE_URL"] = "postgresql://dw@/postgres?host=%s&port=%s" % (sock, port)
+        # A session logged before the database was set gets pushed on the first sync.
+        earlier = (dt.datetime.now() - dt.timedelta(minutes=1)).astimezone().isoformat(timespec="seconds")
+        with open(self.env["DEEPWORK_LOG"], "w") as f:
+            f.write(json.dumps({"who": "tester", "start": earlier, "minutes": 30, "goal": "it's $dw$ quoted"}) + "\n")
+        self.run_cli("10", "-y", "-g", "mirrored")
+        r = self.run_cli("off", "-y")
+        self.assertIn("Synced 2 session(s)", r.stdout)
+        self.assertIn("Synced 2 session(s)", self.run_cli("sync").stdout)  # idempotent
+        os.remove(self.env["DEEPWORK_LOG"])  # stats now come from the database alone
+        out = self.run_cli("stats").stdout
+        self.assertIn("mirrored", out)
+        self.assertIn("it's $dw$ quoted", out)
+        count = subprocess.run(["psql", self.env["DEEPWORK_DATABASE_URL"], "-Atc", "select count(*) from deepwork_sessions"],
+                               capture_output=True, text=True).stdout.strip()
+        self.assertEqual(count, "2")
 
 
 def m_all_frames(ext):
