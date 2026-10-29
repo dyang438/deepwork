@@ -114,3 +114,11 @@ export const googleCalendarGrants = pgTable("google_calendar_grants", {
   scope: text("scope").notNull(),
   created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// The last Calendar connect attempt per user, so a failed Google round-trip says why instead of failing silently.
+export const googleCalendarAttempts = pgTable("google_calendar_attempts", {
+  user_id: uuid("user_id").primaryKey(),
+  outcome: text("outcome").notNull(),
+  detail: text("detail").notNull().default(""),
+  at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+});

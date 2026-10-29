@@ -1,21 +1,31 @@
+import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 
 import { getUser } from "@/auth/server";
 import { CALENDAR_SCOPES } from "@/lib/calendar-scopes";
 import { getDb } from "@/lib/db";
-import { googleCalendarGrants, googleTokenCache } from "@/lib/schema";
+import { googleCalendarAttempts, googleCalendarGrants, googleTokenCache } from "@/lib/schema";
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
-  const back = (q: string) => Response.redirect(`${url.origin}/app?calendar=${q}`);
-  const jar = await cookies();
-  const state = jar.get("gcal_state")?.value;
-  jar.delete({ name: "gcal_state", path: "/api/calendar" });
+  const state = (await cookies()).get("gcal_state")?.value;
   const user = await getUser();
-  if (!user) return Response.redirect(`${url.origin}/auth/sign-in`);
-  if (!state || url.searchParams.get("state") !== state) return back("error");
+  if (!user) return NextResponse.redirect(`${url.origin}/auth/sign-in`);
+  const db = getDb();
+  // Every outcome is saved (never token values), so the settings gear can say why a connect didn't take.
+  const back = async (outcome: string, detail = "") => {
+    await db
+      .insert(googleCalendarAttempts)
+      .values({ user_id: user.id, outcome, detail })
+      .onConflictDoUpdate({ target: googleCalendarAttempts.user_id, set: { outcome, detail, at: new Date() } });
+    const res = NextResponse.redirect(`${url.origin}/app?calendar=${outcome}`);
+    res.cookies.delete({ name: "gcal_state", path: "/" });
+    return res;
+  };
+  if (url.searchParams.get("error")) return back("declined", url.searchParams.get("error")!);
+  if (!state || url.searchParams.get("state") !== state) return back("error", state ? "state mismatch" : "state cookie missing");
   const code = url.searchParams.get("code");
-  if (!code) return back("declined"); // the user said no: everything else keeps working
+  if (!code) return back("declined", "no code");
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -28,12 +38,9 @@ export async function GET(request: Request) {
     }),
     cache: "no-store",
   });
-  if (!res.ok) return back("error");
+  if (!res.ok) return back("error", `token exchange ${res.status}: ${((await res.json().catch(() => ({}))) as { error?: string }).error ?? ""}`);
   const t = (await res.json()) as { access_token: string; expires_in: number; refresh_token?: string; scope?: string };
-  // Field names only, never values: shows whether Google sent a refresh grant.
-  console.log("[calendar] token response fields:", Object.keys(t).join(","));
-  if (!CALENDAR_SCOPES.every((s) => t.scope?.includes(s))) return back("declined"); // unticked a permission
-  const db = getDb();
+  if (!CALENDAR_SCOPES.every((s) => t.scope?.includes(s))) return back("declined", `granted: ${t.scope ?? ""}`); // unticked a permission
   if (t.refresh_token)
     await db
       .insert(googleCalendarGrants)
@@ -44,5 +51,5 @@ export async function GET(request: Request) {
     .insert(googleTokenCache)
     .values({ user_id: user.id, access_token: t.access_token, expires_at })
     .onConflictDoUpdate({ target: googleTokenCache.user_id, set: { access_token: t.access_token, expires_at } });
-  return back("connected");
+  return back(t.refresh_token ? "connected" : "short", `fields: ${Object.keys(t).join(",")}`);
 }

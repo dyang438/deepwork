@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 
-type Status = { connected: boolean; reconnect?: boolean } | null;
+type Status = { connected: boolean; reconnect?: boolean; attempt?: { outcome: string; detail: string } } | null;
 
 // Optional: grants read-only Calendar access so + can stop a block 5 minutes before your next event.
 export function CalendarConnect() {
@@ -31,6 +31,9 @@ export function CalendarConnect() {
         <p className="m-0 mt-0.5 text-xs text-mist">
           {ok ? "Connected, read-only. + stops 5 minutes before your next event." : "Optional. Read-only, used to fit blocks before your next event."}
         </p>
+        {!ok && status?.attempt && status.attempt.outcome !== "connected" && (
+          <p className="m-0 mt-1 text-xs text-rose">Last try didn&apos;t take ({status.attempt.outcome}{status.attempt.detail && `: ${status.attempt.detail}`}).</p>
+        )}
         {error && <p className="m-0 mt-1 text-xs text-rose" role="alert">{error}</p>}
       </div>
       {status && !ok && (
