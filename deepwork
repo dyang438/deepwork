@@ -5,7 +5,7 @@
   deepwork off            end the session now and run the shutdown questions
   deepwork status         show the current session
   deepwork stats          deep hours today, this week, per goal (--all includes everyone in the store)
-  deepwork capture "..."  append a stray thought to the capture file
+  deepwork capture "..."  append a stray thought to the capture file (and your web notepad)
   deepwork sync           push the local log to deepwork.garden and/or the database (database_url in settings)
   deepwork login [url]    connect this terminal to your deepwork.garden account (default https://deepwork.garden)
   deepwork logout         forget that connection
@@ -221,6 +221,11 @@ class Web:
 
     def clear(self):
         self.call("DELETE", "/api/cli/active", timeout=4)
+
+    def notepad(self, lines):
+        code, body = self.call("POST", "/api/cli/notepad", {"lines": lines}, timeout=4)
+        if code != 200:
+            raise RuntimeError("deepwork.garden refused the note (%s): %s" % (code, body.get("error")))
 
     def sync(self, records):
         rows = [{"id": str(uuid.uuid5(uuid.NAMESPACE_URL, "deepwork:" + record_id(r))),
@@ -624,8 +629,8 @@ def _shutdown(cfg, assume_yes, s):
             focus = max(0, min(100, int(f))) if f.isdigit() else None
         for c in q.get("custom") or []:
             answers[c] = ask(c.rstrip() + " ")
-    for line in loops:
-        append_capture(cfg, line, "open loop")
+    if loops and (miss := append_capture(cfg, loops, "open loop")):
+        print(miss)
     start_ts = s.get("start", ended)
     rec = {
         "who": s.get("who", cfg.who), "start": iso(start_ts), "end": iso(ended),
@@ -645,10 +650,20 @@ def _shutdown(cfg, assume_yes, s):
     print("Logged %.0f min. Shutdown complete." % rec["minutes"])
 
 
-def append_capture(cfg, text, tag="capture"):
+def append_capture(cfg, texts, tag="capture"):
+    """Appends to the local capture file, and to the deepwork.garden notepad when signed in. Returns a note if
+    the web copy failed (the local line is always written)."""
+    texts = [texts] if isinstance(texts, str) else texts
     cfg.ensure_dirs()
     with open(cfg.capture, "a") as f:
-        f.write("- [%s] (%s) %s\n" % (dt.datetime.now().strftime("%Y-%m-%d %H:%M"), tag, text))
+        for text in texts:
+            f.write("- [%s] (%s) %s\n" % (dt.datetime.now().strftime("%Y-%m-%d %H:%M"), tag, text))
+    if not cfg.web.enabled:
+        return None
+    try:
+        cfg.web.notepad([("- [ ] " if tag == "open loop" else "- ") + t for t in texts])
+    except Exception as e:
+        return "Not on your deepwork.garden notepad (%s); kept in %s." % (e, cfg.capture)
 
 
 def status(cfg):
@@ -986,8 +1001,8 @@ def main(argv):
         text = " ".join(rest[1:]).strip()
         if not text:
             sys.exit('usage: deepwork capture "<thought>"')
-        append_capture(cfg, text)
-        return print("Captured.")
+        note = append_capture(cfg, text)
+        return print(note or ("Captured, also on your deepwork.garden notepad." if cfg.web.enabled else "Captured."))
     if cmd == "sync":
         if not (cfg.database_url or cfg.web.enabled):
             sys.exit('Nowhere to sync. Run deepwork login, or add "database_url" with: deepwork questions')

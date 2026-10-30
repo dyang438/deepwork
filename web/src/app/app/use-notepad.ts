@@ -38,10 +38,16 @@ export function useNotepad(userId: string, initial: string) {
         const value = latest.current;
         setStatus("saving");
         try {
-          const result = await saveNotepad(userId, { text: value });
+          const result = await saveNotepad(userId, { text: value, base: saved.current });
           if (!result.ok) throw new Error(result.error);
-          saved.current = value;
-          if (latest.current === value) {
+          // The server tacked on lines captured from the CLI: show them, after anything typed meanwhile.
+          const extra = result.text && result.text !== value && result.text.startsWith(value) ? result.text.slice(value.length) : "";
+          saved.current = value + extra;
+          if (extra) {
+            latest.current += extra;
+            setText(latest.current);
+          }
+          if (latest.current === saved.current) {
             try { localStorage.removeItem(storageKey); } catch { /* Saved to the account. */ }
           }
         } catch (cause) {

@@ -311,6 +311,10 @@ class TestStore(Base):
         self.assertEqual(self.run_cli("sync").stdout.strip(), "Synced 1 session(s) to deepwork.garden.")
         self.assertEqual(up[0]["id"], [c for c in calls if c[1] == "/api/cli/sessions"][-1][3]["sessions"][0]["id"])
 
+        r = self.run_cli("capture", "rate", "limits")
+        self.assertIn("also on your deepwork.garden notepad", r.stdout)
+        self.assertEqual([c for c in calls if c[1] == "/api/cli/notepad"][-1][3], {"lines": ["- rate limits"]})
+
         self.run_cli("logout")
         self.assertFalse(os.path.exists(creds))
 
