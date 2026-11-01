@@ -9,7 +9,7 @@ import { userSettings } from "./schema";
 export const DEFAULT_PHILOSOPHY = `Hello!
 
 I created The Garden for two reasons.
-I wanted to look at Da Vinci's Roses... and I wanted more time to look at Da Vinci's Roses.
+I wanted to look at Van Gogh's Roses... and I wanted more time to look at Van Gogh's Roses.
 
 Through working deeply, we have the chance to do something thought impossible. In aggregate, we're generating more time for our progression in life. I liken the prospect and allure to that of time travel for that reason.
 
