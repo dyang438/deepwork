@@ -1,11 +1,9 @@
 {
   "manifest_version": 3,
   "name": "deepwork",
-  "version": "2.3.0",
-  "description": "Blocks inbox, calendar, shopping and YouTube and hides X and LinkedIn feeds, only while a deepwork session is running. Reports active-tab domains (never paths or titles) to the local deepwork sampler.",
+  "version": "3.0.0",
+  "description": "Covers YouTube and streaming sites unless the video is informative, and hides X and LinkedIn feeds, only while a deepwork session is running. Reports active-tab domains to the local deepwork sampler; a covered page's URL and title go to it only to judge the video.",
   "permissions": [
-    "declarativeNetRequest",
-    "declarativeNetRequestFeedback",
     "storage",
     "alarms",
     "tabs"
@@ -15,15 +13,6 @@
   ],
   "background": {
     "service_worker": "background.js"
-  },
-  "declarative_net_request": {
-    "rule_resources": [
-      {
-        "id": "deepwork_block",
-        "enabled": false,
-        "path": "rules.json"
-      }
-    ]
   },
   "content_scripts": [
     {
@@ -40,48 +29,38 @@
     },
     {
       "matches": [
-        "https://mail.google.com/*",
-        "https://calendar.google.com/*",
-        "https://app.shortwave.com/*",
-        "https://*.amazon.com/*",
-        "https://amazon.com/*",
-        "https://*.doordash.com/*",
-        "https://doordash.com/*",
         "https://*.youtube.com/*",
         "https://youtube.com/*",
-        "https://superhuman.com/*",
-        "https://*.superhuman.com/*"
-      ],
-      "exclude_matches": [
-        "https://*.aws.amazon.com/*",
-        "https://aws.amazon.com/*"
+        "https://netflix.com/*",
+        "https://*.netflix.com/*",
+        "https://twitch.tv/*",
+        "https://*.twitch.tv/*",
+        "https://tiktok.com/*",
+        "https://*.tiktok.com/*",
+        "https://hulu.com/*",
+        "https://*.hulu.com/*",
+        "https://disneyplus.com/*",
+        "https://*.disneyplus.com/*",
+        "https://max.com/*",
+        "https://*.max.com/*",
+        "https://hbomax.com/*",
+        "https://*.hbomax.com/*",
+        "https://peacocktv.com/*",
+        "https://*.peacocktv.com/*",
+        "https://paramountplus.com/*",
+        "https://*.paramountplus.com/*",
+        "https://tv.apple.com/*",
+        "https://*.tv.apple.com/*",
+        "https://crunchyroll.com/*",
+        "https://*.crunchyroll.com/*",
+        "https://vimeo.com/*",
+        "https://*.vimeo.com/*"
       ],
       "js": [
         "overlay.js"
       ],
       "run_at": "document_start",
       "all_frames": true
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "blocked.html",
-        "blocked.js"
-      ],
-      "matches": [
-        "https://mail.google.com/*",
-        "https://calendar.google.com/*",
-        "https://app.shortwave.com/*",
-        "https://*.amazon.com/*",
-        "https://amazon.com/*",
-        "https://*.doordash.com/*",
-        "https://doordash.com/*",
-        "https://*.youtube.com/*",
-        "https://youtube.com/*",
-        "https://superhuman.com/*",
-        "https://*.superhuman.com/*"
-      ]
     }
   ]
 }

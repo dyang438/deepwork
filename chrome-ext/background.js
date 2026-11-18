@@ -2,8 +2,8 @@
 // Session state comes from the deepwork watchdog at http://127.0.0.1:47615/state.
 // If the endpoint is unreachable there is no session: everything is allowed (fail open).
 // While sampling, it reports the active tab's DOMAIN only (no path, query or title) and counts block hits.
+// A covered page's URL and title go to the local deepwork only to ask whether it looks like work (/judge).
 const BASE = "http://127.0.0.1:47615";
-const RULESET = "deepwork_block";
 
 async function getState() {
   const v = await chrome.storage.local.get("deepwork");
@@ -18,9 +18,6 @@ async function refresh() {
     if (r.ok) state = await r.json();
   } catch (e) { /* no session running */ }
   if (state.end_ts && Date.now() / 1000 >= state.end_ts) { state.active = false; state.sampling = false; }
-  await chrome.declarativeNetRequest.updateEnabledRulesets(
-    state.active ? { enableRulesetIds: [RULESET] } : { disableRulesetIds: [RULESET] }
-  );
   await chrome.storage.local.set({ deepwork: state });
   if (state.sampling && !prev.sampling) reportActiveTab();
   return state;
@@ -58,16 +55,31 @@ chrome.tabs.onUpdated.addListener((_id, info, tab) => {
   if (info.url && tab.active) post("/tab", { domain: domainOf(info.url) });
 });
 
-// Network-level blocks (new page loads). Available to unpacked extensions with declarativeNetRequestFeedback.
-if (chrome.declarativeNetRequest.onRuleMatchedDebug) {
-  chrome.declarativeNetRequest.onRuleMatchedDebug.addListener((m) => {
-    post("/hit", { domain: domainOf(m.request.url), kind: "block" });
-  });
+// A covered page asks whether it looks like work; the verdict goes back to it and to every frame of its tab.
+async function judge(page) {
+  try {
+    const r = await fetch(BASE + "/judge", { method: "POST", headers: { "Content-Type": "application/json", "X-Deepwork": "1" },
+      body: JSON.stringify(page) });
+    if (r.ok) return !!(await r.json()).allow;
+  } catch (e) { /* no session */ }
+  return false;
 }
 
 // Content scripts ask for a fresh check on page load, and report feed-hide and cover hits.
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (!msg) return;
   if (msg.type === "deepwork-refresh") { refresh().then(reply); return true; }
+  if (msg.type === "deepwork-override") {
+    post("/override", { url: msg.url });
+    if (_sender.tab) chrome.tabs.sendMessage(_sender.tab.id, { type: "deepwork-verdict", allow: true }).catch(() => {});
+    return;
+  }
+  if (msg.type === "deepwork-judge") {
+    judge(msg.page || {}).then((allow) => {
+      reply({ allow });
+      if (_sender.tab) chrome.tabs.sendMessage(_sender.tab.id, { type: "deepwork-verdict", allow }).catch(() => {});
+    });
+    return true;
+  }
   if (msg.type === "deepwork-hit") post("/hit", { domain: msg.domain, kind: msg.kind });
 });

@@ -1,4 +1,6 @@
-// Covers tabs that were already open on a blocked site when a session starts (new loads are redirected by rules.json).
+// Covers blocked sites while a session runs, in tabs already open and in new loads.
+// Runs on YouTube and streaming sites. The top frame asks deepwork whether the video is informative
+// (deepwork's work_pass model); a tutorial, talk or explainer is uncovered. Every cover has an override. Each new URL (YouTube and Gmail change it without reloading) is judged again.
 // The tab is never closed or reloaded; the cover disappears when the session ends.
 // While covered, every audio and video element is paused and kept paused, in every frame this script runs in.
 // Nothing is resumed when the session ends; that is left to the user.
@@ -34,7 +36,7 @@ function makeCover(doc, Observer, text) {
   let el = null;
   let mo = null;
   const STYLE = "position:fixed;inset:0;width:100vw;height:100vh;max-width:none;max-height:none;margin:0;border:0;" +
-    "z-index:2147483647;display:flex;align-items:center;justify-content:center;background:#111;color:#eee;" +
+    "z-index:2147483647;outline:none;display:flex;align-items:center;justify-content:center;background:#111;color:#eee;" +
     "font:600 22px -apple-system,system-ui,sans-serif;text-align:center;padding:24px;box-sizing:border-box;";
   function raise() {
     if (!el) return;
@@ -75,29 +77,90 @@ function makeCover(doc, Observer, text) {
 }
 if (typeof module !== "undefined") module.exports = { makeMediaGuard, makeCover };
 
-if (typeof chrome !== "undefined" && chrome.storage && !/(^|\.)aws\.amazon\.com$/.test(location.hostname)) {
+if (typeof chrome !== "undefined" && chrome.storage) {
   const top = window === window.top;
+  const BLOCKED = "Deep work session running. This looks like entertainment; it waits until the session ends.";
   const guard = makeMediaGuard(document, window.MutationObserver);
-  const cover = makeCover(document, window.MutationObserver,
-    "Deep work session running. Inbox, calendar, shopping and YouTube wait until it ends.");
+  const CHECKING = "Deep work session running. Checking whether this video is informative…";
+  const cover = makeCover(document, window.MutationObserver, CHECKING);
   let active = false;
+  let passed = false;   // the latest verdict for this tab let the page through
+  let verdict = null;   // top frame: { url, allow } once the current URL is judged
+  let judging = null;   // top frame: URL being judged
+  let lastTitle = null; // top frame: title sent with the previous verdict
   const hit = () => chrome.runtime.sendMessage({ type: "deepwork-hit", domain: location.hostname, kind: "cover" }).catch(() => {});
-  // Switching back to an already-covered tab counts as another attempt, and re-raises the cover.
+  // Switching back to a covered tab counts as another attempt, and re-raises the cover.
   document.addEventListener("visibilitychange", () => {
-    if (top && active && document.visibilityState === "visible" && cover.el) { hit(); cover.raise(); }
+    if (top && active && document.visibilityState === "visible" && cover.el && verdict) { hit(); cover.raise(); }
   });
+  function judge(url) {
+    judging = url;
+    const t0 = Date.now();
+    // Wait for a title; after a same-page navigation it still shows the previous page for a moment.
+    const ready = () => Date.now() - t0 > 3000 ||
+      (document.readyState !== "loading" && document.title && document.title !== lastTitle);
+    const go = () => {
+      if (location.href !== url || !active) { judging = null; return render(); }
+      if (!ready()) return setTimeout(go, 200);
+      const d = document.querySelector('meta[name="description"], meta[property="og:description"]');
+      const page = { url, title: document.title, description: d ? d.content : "" };
+      lastTitle = page.title;
+      chrome.runtime.sendMessage({ type: "deepwork-judge", page }).then((r) => {
+        judging = null;
+        if (location.href !== url) return render();
+        verdict = { url, allow: !!(r && r.allow) };
+        if (!verdict.allow && active) hit();
+        render();
+      }).catch(() => { judging = null; verdict = { url, allow: false }; render(); });
+    };
+    go();
+  }
+  // The blocked cover says why and offers an override; the override is logged and lasts the session.
+  function blockedCover(el) {
+    if (el.dataset.blocked) return;
+    el.dataset.blocked = "1";
+    el.textContent = "";
+    const msg = document.createElement("div");
+    msg.textContent = BLOCKED;
+    const btn = document.createElement("button");
+    btn.textContent = "Let this page through";
+    btn.setAttribute("style", "display:block;margin:24px auto 0;padding:8px 16px;border:1px solid #666;border-radius:6px;" +
+      "background:transparent;color:#bbb;font:500 14px -apple-system,system-ui,sans-serif;cursor:pointer;");
+    btn.addEventListener("click", () => {
+      const url = location.href;
+      chrome.runtime.sendMessage({ type: "deepwork-override", url }).catch(() => {});
+      verdict = { url, allow: true };
+      render();
+    });
+    const box = document.createElement("div");
+    box.append(msg, btn);
+    el.append(box);
+  }
   function render() {
-    if (active) guard.enable(); else guard.disable();
-    if (!top) return;  // subframes only pause media; the cover lives in the top frame
-    if (!active) return cover.hide();
-    if (cover.show()) hit();
-    else cover.raise();
+    const judged = !!verdict && verdict.url === location.href;
+    if (top) passed = active && judged && verdict.allow;
+    if (active && !passed) guard.enable(); else guard.disable();
+    if (!top) return;  // subframes only pause media; the cover and the verdict live in the top frame
+    if (!active) { verdict = null; return cover.hide(); }
+    if (passed) return cover.hide();
+    if (!cover.show()) cover.raise();
+    if (judged) blockedCover(cover.el);
+    else if (cover.el.dataset.blocked || !cover.el.textContent) { delete cover.el.dataset.blocked; cover.el.textContent = CHECKING; }
+    if (!judged && judging !== location.href) judge(location.href);
   }
   chrome.storage.local.get("deepwork", (v) => { active = !!(v.deepwork && v.deepwork.active); render(); });
   chrome.storage.onChanged.addListener((ch) => {
     if (ch.deepwork) { active = !!(ch.deepwork.newValue && ch.deepwork.newValue.active); render(); }
   });
+  // The background relays each verdict to every frame of the tab, so subframes stop pausing media too.
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg && msg.type === "deepwork-verdict" && !top) { passed = !!msg.allow; render(); }
+  });
   document.addEventListener("DOMContentLoaded", render);
   window.addEventListener("load", render);
-  if (top) chrome.runtime.sendMessage({ type: "deepwork-refresh" }).catch(() => {});
+  if (top) {
+    let href = location.href;
+    setInterval(() => { if (location.href !== href) { href = location.href; render(); } }, 500);
+    chrome.runtime.sendMessage({ type: "deepwork-refresh" }).catch(() => {});
+  }
 }

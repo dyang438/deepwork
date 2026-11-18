@@ -58,9 +58,10 @@ class TestFlow(Base):
         self.assertEqual(s["checklist"], {"water or coffee": True, "phone in another room": True, "materials open": False})
         self.assertNotIn("food", s["checklist"])  # food only asked when over 90 min
         acts = open(self.path("state", "actions.log")).read()
-        for a in ("quit Slack", "quit Shortwave", "quit Messages", "quit Mail", "shortcut deepwork-on"):
+        for a in ("quit Shortwave", "quit Messages", "quit Mail", "shortcut deepwork-on"):
             self.assertIn(a, acts)
         self.assertNotIn("Chrome", acts)
+        self.assertNotIn("Slack", acts)  # Slack stays open during deep work
         time.sleep(1.0)
         st = json.load(urllib.request.urlopen("http://127.0.0.1:%s/state" % self.env["DEEPWORK_PORT"], timeout=2))
         self.assertTrue(st["active"])
@@ -80,7 +81,7 @@ class TestFlow(Base):
         self.assertIn("(open loop) fix grader", cap)
         acts = open(self.path("state", "actions.log")).read()
         self.assertIn("shortcut deepwork-off", acts)
-        self.assertIn("open Slack", acts)
+        self.assertIn("open Mail", acts)
         time.sleep(0.5)
         self.assertFalse(dw.pid_alive(s["watchdog_pid"]))
         with self.assertRaises(Exception):
@@ -187,6 +188,43 @@ class TestActivity(Base):
         self.assertEqual(a["domain_switches_per_h"] > 0, True)
         self.assertIn("focus", r.stdout)
         self.assertIn("Sessions this week", self.run_cli("stats").stdout)
+
+    def test_judge_lets_work_pages_through(self):
+        # A fake model: allows any page whose title mentions Postgres, and logs each call.
+        fake = self.path("fake_openai.py")
+        with open(fake, "w") as f:
+            f.write("import json, sys\nb = json.load(sys.stdin)\nopen(%r, 'a').write('call\\n')\n"
+                    "ok = 'Postgres' in b['input'][1]['content']\n"
+                    "print(json.dumps({'output': [{'type': 'message', 'content': [{'type': 'output_text', "
+                    "'text': json.dumps({'allow': ok})}]}]}))\n" % self.path("calls.log"))
+        self.env.pop("OPENAI_API_KEY", None)
+        self.env["DEEPWORK_OPENAI_CMD"] = "%s %s" % (sys.executable, fake)
+        self.run_cli("10", "-y", "-g", "migration")
+        time.sleep(1.0)
+        judge = lambda title, url: json.load(self.post("/judge", {"url": url, "title": title}))["allow"]
+        self.assertTrue(judge("Postgres replication explained - YouTube", "https://www.youtube.com/watch?v=1"))
+        self.assertFalse(judge("Cat fails - YouTube", "https://www.youtube.com/watch?v=2"))
+        self.assertTrue(judge("anything", "https://www.youtube.com/watch?v=1"))  # cached per URL for the session
+        self.assertEqual(open(self.path("calls.log")).read().count("call"), 2)
+        with self.assertRaises(urllib.error.HTTPError):
+            self.post("/judge", {"url": "https://www.youtube.com/"}, header=False)
+        self.post("/override", {"url": "https://www.youtube.com/watch?v=2"})  # "Let this page through"
+        self.assertTrue(judge("Cat fails - YouTube", "https://www.youtube.com/watch?v=2"))
+        self.assertEqual(open(self.path("calls.log")).read().count("call"), 2)
+        self.run_cli("off", "-y")
+        rec = json.loads(open(self.env["DEEPWORK_LOG"]).read().strip())
+        self.assertEqual(rec["activity"]["work_passes"], {"www.youtube.com": 1})
+        self.assertEqual(rec["activity"]["overrides"], {"www.youtube.com": 1})
+
+    def test_judge_fails_closed(self):
+        self.env.pop("OPENAI_API_KEY", None)
+        self.env["DEEPWORK_OPENAI_CMD"] = "false"
+        self.run_cli("10", "-y", "-g", "g")
+        time.sleep(1.0)
+        self.assertFalse(json.load(self.post("/judge", {"url": "https://www.youtube.com/watch?v=1",
+                                                        "title": "Postgres"}))["allow"])
+        self.run_cli("off", "-y")
+
 
 class TestSummarize(unittest.TestCase):
     def test_summary_math(self):
@@ -354,28 +392,18 @@ def m_all_frames(ext):
 class TestExtension(unittest.TestCase):
     EXT = os.path.join(ROOT, "chrome-ext")
 
-    def test_manifest_and_rules(self):
+    def test_manifest(self):
         m = json.load(open(os.path.join(self.EXT, "manifest.json")))
         self.assertEqual(m["manifest_version"], 3)
-        for f in [m["background"]["service_worker"]] + [j for cs in m["content_scripts"] for j in cs["js"]] + \
-                 [r["path"] for r in m["declarative_net_request"]["rule_resources"]] + \
-                 m["web_accessible_resources"][0]["resources"]:
+        for f in [m["background"]["service_worker"]] + [j for cs in m["content_scripts"] for j in cs["js"]]:
             self.assertTrue(os.path.exists(os.path.join(self.EXT, f)), f)
-        rs = m["declarative_net_request"]["rule_resources"][0]
-        self.assertFalse(rs["enabled"])  # off unless a session is running
-        rules = json.load(open(os.path.join(self.EXT, rs["path"])))
-        ids = [r["id"] for r in rules]
-        self.assertEqual(len(ids), len(set(ids)))
-        doms = rules[0]["condition"]["requestDomains"]
-        for d in ("amazon.com", "doordash.com", "mail.google.com", "app.shortwave.com", "calendar.google.com",
-                  "youtube.com", "youtu.be", "superhuman.com"):
-            self.assertIn(d, doms)
-        self.assertEqual(rules[0]["action"]["redirect"]["extensionPath"], "/blocked.html")
-        self.assertNotIn("m.youtube.com", doms)  # requestDomains already covers subdomains
+        self.assertNotIn("declarative_net_request", m)  # the cover handles new loads too, so a page can be judged
         cover = m["content_scripts"][1]["matches"]
-        self.assertIn("https://*.youtube.com/*", cover)
-        self.assertIn("https://*.superhuman.com/*", cover)  # mail.superhuman.com  # m.youtube.com and www, for already-open tabs
-        self.assertIn("declarativeNetRequestFeedback", m["permissions"])
+        for d in ("*.youtube.com", "netflix.com", "*.netflix.com", "*.twitch.tv", "*.tiktok.com"):
+            self.assertIn("https://%s/*" % d, cover)
+        for d in ("amazon", "mail.google", "calendar", "doordash", "shortwave", "superhuman"):  # only video is covered
+            self.assertFalse([u for u in cover if d in u], d)
+        self.assertEqual(m["content_scripts"][1]["run_at"], "document_start")
         bg = open(os.path.join(self.EXT, "background.js")).read()
         self.assertNotIn("tab.title", bg)  # privacy: domains only
         self.assertIn("http://127.0.0.1:47615/*", m["host_permissions"])

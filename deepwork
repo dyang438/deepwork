@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -47,7 +48,9 @@ DEFAULT_SERVER = "https://deepwork.garden"
 DEFAULT_CONFIG = {
     "tracking": True,  # sample front app, Chrome site and blocked-site pulls
     "database_url": None,  # postgres://... to also keep sessions in Postgres (needs psql)
-    "quit_apps": ["Slack", "Shortwave", "Messages", "Mail"],  # desktop apps only; never Chrome
+    "quit_apps": ["Shortwave", "Messages", "Mail"],  # desktop apps only; never Chrome
+    # OpenAI model that lets informative YouTube and streaming videos through (false: cover them all).
+    "work_pass": "gpt-6-luna",
     "music_pause": False,
     "sounds": {"start": None, "notify": "Glass"},
     "start_questions": {
@@ -717,6 +720,10 @@ def summarize(events):
         "top_apps": [[a, m(c)] for a, c in apps.most_common(5)],
         "top_domains": [[d, m(c)] for d, c in doms.most_common(5)],
         "blocked_attempts": dict(hits.most_common()),
+        "work_passes": dict(collections.Counter(e.get("domain") or "?" for e in events
+                                                if e.get("type") == "pass").most_common()),
+        "overrides": dict(collections.Counter(e.get("domain") or "?" for e in events
+                                              if e.get("type") == "override").most_common()),
     }
 
 
@@ -831,6 +838,12 @@ class Recorder:
     def hit(self, domain, kind):
         self.write({"type": "hit", "domain": clean_domain(domain) or "?", "kind": str(kind)[:20]})
 
+    def passed(self, domain):
+        self.write({"type": "pass", "domain": clean_domain(domain) or "?"})
+
+    def override(self, domain):
+        self.write({"type": "override", "domain": clean_domain(domain) or "?"})
+
     def sample(self):
         try:
             idle, app = hid_idle_seconds(), front_app()
@@ -869,7 +882,62 @@ def spawn_watchdog(cfg):
     return int(data)
 
 
+# ---------- work pass: a blocked Chrome page that looks like work is let through ----------
+
+WORK_PASS_PROMPT = (
+    "A focus blocker covers YouTube and video streaming sites (Netflix, Twitch, TikTok and the like) during a "
+    "deep-work block. It lets any informative video through and blocks entertainment. You see one page. "
+    "Let it through (allow=true) when the video teaches, explains or informs on any subject: tutorials, how-tos, "
+    "courses, lectures, talks, explainers, documentaries, analysis, live coding or building streams, meeting or "
+    "company recordings. Block it (allow=false) when it is watched for fun: shows and films, music, gaming and "
+    "just-chatting streams, sport, vlogs, comedy, pranks, shorts, and pages that are not one video (home pages, "
+    "feeds, search and recommendation pages). When it is a toss-up, allow.")
+VERDICT = {"type": "json_schema", "name": "verdict", "strict": True,
+           "schema": {"type": "object", "additionalProperties": False,
+                      "properties": {"allow": {"type": "boolean"}}, "required": ["allow"]}}
+
+
+def openai_responses(body, timeout=10):
+    """POST /v1/responses with OPENAI_API_KEY, or through DEEPWORK_OPENAI_CMD (gets the body on stdin, prints the reply)."""
+    key = os.environ.get("OPENAI_API_KEY")
+    if key:
+        req = urllib.request.Request("https://api.openai.com/v1/responses", json.dumps(body).encode(),
+                                     {"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.load(r)
+    cmd = os.environ.get("DEEPWORK_OPENAI_CMD")
+    if not cmd:
+        mg = shutil.which("maingen") or os.path.expanduser("~/.local/bin/maingen")
+        if not os.path.exists(mg):
+            raise RuntimeError("set OPENAI_API_KEY (or DEEPWORK_OPENAI_CMD)")
+        cmd = shlex.quote(mg) + ' api openai POST /v1/responses --data "$(cat)"'
+    r = subprocess.run(cmd, shell=True, input=json.dumps(body), capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError("openai command exited %d: %s" % (r.returncode, (r.stderr or r.stdout).strip()[:200]))
+    return json.loads(r.stdout)
+
+
+def work_pass(cfg, page):
+    """True when the model says this page is an informative video. Any failure keeps it blocked."""
+    model = cfg.conf.get("work_pass")
+    if not model:
+        return False
+    text = "URL: %s\nTitle: %s\nDescription: %s" % (
+        str(page.get("url") or "")[:500], str(page.get("title") or "")[:300], str(page.get("description") or "")[:500])
+    body = {"model": model, "max_output_tokens": 100, "reasoning": {"effort": "none"}, "text": {"format": VERDICT},
+            "input": [{"role": "system", "content": WORK_PASS_PROMPT}, {"role": "user", "content": text}]}
+    try:
+        out = openai_responses(body)
+        reply = next(c["text"] for o in out.get("output", []) if o.get("type") == "message"
+                     for c in o.get("content", []) if c.get("type") == "output_text")
+        return json.loads(reply).get("allow") is True
+    except Exception as e:
+        print("%s work pass failed, page stays blocked: %s" % (iso(now()), e), flush=True)
+        return False
+
+
 def serve_state(cfg, rec):
+    verdicts = {}  # (session start, url) -> allow, so a page is judged once per session
     class H(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             s = read_json(cfg.session)
@@ -884,7 +952,7 @@ def serve_state(cfg, rec):
             if self.headers.get("X-Deepwork") != "1":
                 return self.reply(b"{}", 403)
             try:
-                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                n = min(int(self.headers.get("Content-Length") or 0), 8192)
                 data = json.loads(self.rfile.read(n) or b"{}")
             except ValueError:
                 return self.reply(b"{}", 400)
@@ -892,6 +960,22 @@ def serve_state(cfg, rec):
                 rec.tab(data.get("domain"))
             elif self.path == "/hit":
                 rec.hit(data.get("domain"), data.get("kind", "block"))
+            elif self.path == "/judge":
+                s = read_json(cfg.session)
+                if not s or now() >= s["end"]:
+                    return self.reply(b'{"allow": true}')  # no session, nothing to block
+                key = (s["start"], str(data.get("url") or ""))
+                if key not in verdicts:
+                    verdicts[key] = work_pass(cfg, data)
+                    if verdicts[key]:
+                        rec.passed(urllib.parse.urlsplit(key[1]).hostname)
+                return self.reply(json.dumps({"allow": verdicts[key]}).encode())
+            elif self.path == "/override":  # "Let this page through" on the cover: open for the rest of the session
+                s = read_json(cfg.session)
+                if s and now() < s["end"]:
+                    url = str(data.get("url") or "")
+                    verdicts[(s["start"], url)] = True
+                    rec.override(urllib.parse.urlsplit(url).hostname)
             else:
                 return self.reply(b"{}", 404)
             self.reply(b"{}")

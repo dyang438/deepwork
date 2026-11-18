@@ -1,6 +1,6 @@
 # deepwork
 
-Timed deep work sessions on macOS, after Cal Newport's *Deep Work*. One command quits chat and mail apps, turns on Do Not Disturb, pauses music, blocks distracting sites in Chrome and keeps them closed until the timer ends. When it ends, a short shutdown ritual logs what got done.
+Timed deep work sessions on macOS, after Cal Newport's *Deep Work*. One command quits chat and mail apps, turns on Do Not Disturb, pauses music, covers YouTube and streaming in Chrome (informative videos still play) until the timer ends. When it ends, a short shutdown ritual logs what got done.
 
 ```
 $ deepwork 90
@@ -13,8 +13,8 @@ Deep work until 16:30 (90 min). Goal: ship the parser
 
 ## What it does
 
-- **Start:** asks a few questions (goal, deadline, checklist, all configurable), quits Slack, Shortwave, Messages and Mail, runs your `deepwork-on` Shortcut (Do Not Disturb), optionally pauses music and plays a sound.
-- **During:** a watchdog re-quits those apps every 3 seconds. The Chrome extension covers Gmail, Calendar, Shortwave, Superhuman, Amazon, DoorDash and YouTube, and hides the X and LinkedIn feeds while profiles and posts still work. It never closes tabs.
+- **Start:** asks a few questions (goal, deadline, checklist, all configurable), quits Shortwave, Messages and Mail (Slack stays open), runs your `deepwork-on` Shortcut (Do Not Disturb), optionally pauses music and plays a sound.
+- **During:** a watchdog re-quits those apps every 3 seconds. The Chrome extension covers YouTube and streaming sites (Netflix, Twitch, TikTok, Hulu, Disney+, Max, Peacock, Paramount+, Apple TV, Crunchyroll, Vimeo) unless the video is informative, such as a tutorial, talk or explainer (see `work_pass`). Nothing else is covered. Every cover has a **Let this page through** button that opens that page for the rest of the session and is counted in the stats. It also hides the X and LinkedIn feeds while profiles and posts still work. It never closes tabs.
 - **End:** reopens the apps, runs `deepwork-off`, and opens a Terminal window for the shutdown ritual (done?, what got done, open loops, tomorrow's block).
 - **Stats:** `deepwork stats` shows deep hours today, this week and per goal, plus focus %, app and site switches per hour, longest active stretch and blocked-site attempts.
 - **Storage:** sessions go to a local log. Set `database_url` to also keep them in Postgres, so stats cover every machine (and, with `--all`, everyone sharing the database).
@@ -67,7 +67,8 @@ Flags: `-y` skips the questions, `-g "goal"` sets the goal, `--dry-run` does eve
   "database_url": null,
   "music_pause": false,
   "sounds": {"start": null, "notify": "Glass"},
-  "quit_apps": ["Slack", "Shortwave", "Messages", "Mail"],
+  "quit_apps": ["Shortwave", "Messages", "Mail"],
+  "work_pass": "gpt-6-luna",
   "start_questions": {
     "goal": "Goal (the one thing this block produces): ",
     "deadline": "Deadline, keep it tight [{suggested}]: ",
@@ -88,6 +89,7 @@ Flags: `-y` skips the questions, `-g "goal"` sets the goal, `--dry-run` does eve
 - A question set to `false`, or deleted, is skipped. A string changes its wording. `custom` adds your own questions; answers are saved in the log.
 - `sounds` take macOS system sound names (`Blow`, `Glass`, `Ping`, ...) or `null` for silence.
 - `tracking` samples the front app, the active Chrome site (domain only) and blocked-site attempts every 10 seconds, for the stats. Set it to `false` to record nothing.
+- `work_pass` is the OpenAI model that looks at each covered YouTube or streaming page (URL, title and description) and lets it through when the video is informative (tutorials, talks, lectures, explainers, documentaries) rather than entertainment. Each URL is judged once per session, in about a second. It uses `OPENAI_API_KEY`, or `DEEPWORK_OPENAI_CMD` (a command that gets the Responses API request body on stdin and prints the reply). If neither works the page stays covered. Set it to `false` to cover everything.
 - `database_url` takes a Postgres connection string (`postgres://user:pass@host:5432/db`; Supabase, Neon and RDS all work). Every session is still written to the local log first. Shutdown then upserts the log into a `deepwork_sessions` table (created on first use), and `stats` reads from the table. If the database is unreachable, nothing is lost: the next shutdown or `deepwork sync` catches it up.
 
 ## deepwork.garden
@@ -103,7 +105,7 @@ The web app lives in `web/` (Next.js on Vercel, with Neon Postgres, Auth and Rea
 
 ## Privacy
 
-Everything stays on your Mac in `~/.deepwork`: the log, the samples and your captures. The only exception is `database_url`: if you set it, each session record (goal, times, answers and the activity summary, which lists your top apps and sites) is sent to that database. Raw samples never leave the Mac. The same goes for deepwork.garden: once you run `deepwork login`, only each session's goal, start time, minutes, outcome and focus rating are sent. The extension only talks to deepwork on `127.0.0.1` and never sends paths, page titles or content.
+Everything stays on your Mac in `~/.deepwork`: the log, the samples and your captures. The only exception is `database_url`: if you set it, each session record (goal, times, answers and the activity summary, which lists your top apps and sites) is sent to that database. Raw samples never leave the Mac. The same goes for deepwork.garden: once you run `deepwork login`, only each session's goal, start time, minutes, outcome and focus rating are sent. The extension only talks to deepwork on `127.0.0.1`. It reports the active tab's domain only; for a covered YouTube or streaming page it also sends the URL, title and meta description, which deepwork passes to the `work_pass` model at OpenAI to decide whether to let it through.
 
 ## Contributing
 
