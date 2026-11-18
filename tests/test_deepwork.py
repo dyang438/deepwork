@@ -205,6 +205,10 @@ class TestActivity(Base):
         self.assertTrue(judge("Postgres replication explained - YouTube", "https://www.youtube.com/watch?v=1"))
         self.assertFalse(judge("Cat fails - YouTube", "https://www.youtube.com/watch?v=2"))
         self.assertTrue(judge("anything", "https://www.youtube.com/watch?v=1"))  # cached per URL for the session
+        social = lambda: json.load(self.post("/judge", {"url": "https://x.com/", "judge": False}))["allow"]
+        self.assertFalse(social())  # X and LinkedIn never go to the model
+        self.post("/override", {"url": "https://x.com/"})
+        self.assertTrue(social())
         self.assertEqual(open(self.path("calls.log")).read().count("call"), 2)
         with self.assertRaises(urllib.error.HTTPError):
             self.post("/judge", {"url": "https://www.youtube.com/"}, header=False)
@@ -214,7 +218,7 @@ class TestActivity(Base):
         self.run_cli("off", "-y")
         rec = json.loads(open(self.env["DEEPWORK_LOG"]).read().strip())
         self.assertEqual(rec["activity"]["work_passes"], {"www.youtube.com": 1})
-        self.assertEqual(rec["activity"]["overrides"], {"www.youtube.com": 1})
+        self.assertEqual(rec["activity"]["overrides"], {"www.youtube.com": 1, "x.com": 1})
 
     def test_judge_fails_closed(self):
         self.env.pop("OPENAI_API_KEY", None)
@@ -398,12 +402,14 @@ class TestExtension(unittest.TestCase):
         for f in [m["background"]["service_worker"]] + [j for cs in m["content_scripts"] for j in cs["js"]]:
             self.assertTrue(os.path.exists(os.path.join(self.EXT, f)), f)
         self.assertNotIn("declarative_net_request", m)  # the cover handles new loads too, so a page can be judged
-        cover = m["content_scripts"][1]["matches"]
+        cover = m["content_scripts"][0]["matches"]
         for d in ("*.youtube.com", "netflix.com", "*.netflix.com", "*.twitch.tv", "*.tiktok.com"):
             self.assertIn("https://%s/*" % d, cover)
-        for d in ("amazon", "mail.google", "calendar", "doordash", "shortwave", "superhuman"):  # only video is covered
+        for d in ("x.com", "twitter.com", "www.linkedin.com", "linkedin.com"):
+            self.assertIn("https://%s/*" % d, cover)
+        for d in ("amazon", "mail.google", "calendar", "doordash", "shortwave", "superhuman"):  # only video and social are covered
             self.assertFalse([u for u in cover if d in u], d)
-        self.assertEqual(m["content_scripts"][1]["run_at"], "document_start")
+        self.assertEqual(m["content_scripts"][0]["run_at"], "document_start")
         bg = open(os.path.join(self.EXT, "background.js")).read()
         self.assertNotIn("tab.title", bg)  # privacy: domains only
         self.assertIn("http://127.0.0.1:47615/*", m["host_permissions"])
@@ -414,7 +420,7 @@ class TestExtension(unittest.TestCase):
             if f.endswith(".js"):
                 r = subprocess.run(["node", "--check", os.path.join(self.EXT, f)], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, f + r.stderr)
-        for t in ("test_feeds.js", "test_media.js", "test_cover.js"):
+        for t in ("test_media.js", "test_cover.js"):
             r = subprocess.run(["node", os.path.join(ROOT, "tests", t)], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, t + r.stdout + r.stderr)
         self.assertTrue(m_all_frames(self.EXT))

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "deepwork",
-  "version": "3.0.0",
-  "description": "Covers YouTube and streaming sites unless the video is informative, and hides X and LinkedIn feeds, only while a deepwork session is running. Reports active-tab domains to the local deepwork sampler; a covered page's URL and title go to it only to judge the video.",
+  "version": "3.1.0",
+  "description": "During a deepwork session, covers YouTube and streaming sites unless the video is informative, and covers X and LinkedIn; every cover can be overridden. Reports active-tab domains to the local deepwork sampler; a covered video page's URL and title go to it only to judge the video.",
   "permissions": [
     "storage",
     "alarms",
@@ -15,18 +15,6 @@
     "service_worker": "background.js"
   },
   "content_scripts": [
-    {
-      "matches": [
-        "https://x.com/*",
-        "https://twitter.com/*",
-        "https://www.linkedin.com/*",
-        "https://linkedin.com/*"
-      ],
-      "js": [
-        "feeds.js"
-      ],
-      "run_at": "document_start"
-    },
     {
       "matches": [
         "https://*.youtube.com/*",
@@ -54,7 +42,11 @@
         "https://crunchyroll.com/*",
         "https://*.crunchyroll.com/*",
         "https://vimeo.com/*",
-        "https://*.vimeo.com/*"
+        "https://*.vimeo.com/*",
+        "https://x.com/*",
+        "https://twitter.com/*",
+        "https://www.linkedin.com/*",
+        "https://linkedin.com/*"
       ],
       "js": [
         "overlay.js"

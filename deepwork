@@ -965,6 +965,8 @@ def serve_state(cfg, rec):
                 if not s or now() >= s["end"]:
                     return self.reply(b'{"allow": true}')  # no session, nothing to block
                 key = (s["start"], str(data.get("url") or ""))
+                if key not in verdicts and data.get("judge") is False:
+                    return self.reply(b'{"allow": false}')  # X and LinkedIn: only an override opens them
                 if key not in verdicts:
                     verdicts[key] = work_pass(cfg, data)
                     if verdicts[key]:
