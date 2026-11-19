@@ -98,8 +98,8 @@ Flags: `-y` skips the questions, `-g "goal"` sets the goal, `--dry-run` does eve
 
 - `deepwork 90` counts down in your terminal, shows the block live on the dashboard, and asks the shutdown questions in the same terminal when it ends (Ctrl-C ends early; `-d` returns right away instead).
 - With `deepwork agent install`, a small agent runs at login and checks deepwork.garden every few seconds. Press **+** on the dashboard, type the goal, Enter: the agent starts a real block on your Mac (apps quit, Do Not Disturb, Chrome blocking), and **END** on the countdown stops it. Web-started blocks log themselves when they end.
-- Each finished session is uploaded with its goal, minutes, outcome and self-reported focus; the local log stays the source of truth, and `deepwork sync` re-sends it safely (no duplicates).
-- **My competitions** ranks members by deep hours and minute-weighted self-reported focus since the competition started, live. Start one and share its invite link.
+- Each finished session is uploaded with its goal, minutes, outcome and focus. Deepwork uses the percentage of active samples when available and asks for a manual rating during interactive shutdown if there are no samples. `deepwork sync` re-sends the local log safely, including measured focus for older sessions that have activity data.
+- **My competitions** ranks members by deep hours and minute-weighted focus since the competition started, live. Start one and share its invite link.
 
 The web app lives in `web/` (Next.js on Vercel, with Neon Postgres, Auth and Realtime).
 

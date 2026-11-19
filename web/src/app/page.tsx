@@ -19,7 +19,7 @@ export default function Home() {
           <a className="text-cream/90 hover:text-white" href="https://github.com/dyang438/deepwork">
             CLI
           </a>
-          <Link className="rounded-full border border-cream/30 bg-ink/40 px-4 py-1.5 backdrop-blur hover:border-cream/60" href="/app">
+          <Link className="text-cream/90 hover:text-white" href="/app">
             Dashboard
           </Link>
         </nav>

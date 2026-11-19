@@ -17,6 +17,7 @@ function sessionsQuery(userId: string) {
       minutes: deepSessions.minutes,
       outcome: deepSessions.outcome,
       focus_pct: deepSessions.focus_pct,
+      activity_focus_pct: deepSessions.activity_focus_pct,
       notes: deepSessions.notes,
       started_at: deepSessions.started_at,
     })

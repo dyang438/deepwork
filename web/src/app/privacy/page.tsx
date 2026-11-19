@@ -23,7 +23,7 @@ export default function PrivacyPage() {
         </li>
         <li>
           <strong>Your sessions.</strong> For each deep work session: the goal you typed, start time, length in minutes,
-          outcome (done / partial / not done), the focus rating you chose, and any notes you write. Also the text you write in
+          outcome (done / partial / not done), measured focus from the CLI if available, any focus rating you entered, and any notes you write. Also the text you write in
           Philosophy and your default settings (session length, outcome, focus).
         </li>
         <li>

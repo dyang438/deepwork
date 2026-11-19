@@ -358,6 +358,7 @@ export function SessionList({
       minutes,
       outcome,
       focus_pct,
+      activity_focus_pct: null,
       notes: null,
       started_at: new Date(),
     };
@@ -673,28 +674,34 @@ export function SessionList({
                       {r.outcome.toUpperCase()}
                     </span>
                   </span>
-                  <select
-                    aria-label={`Focus for ${r.goal}`}
-                    className={`${quiet} ${r.focus_pct == null ? "" : "text-cream"}`}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => {
-                      const focus_pct =
-                        e.target.value === "" ? null : Number(e.target.value);
-                      mutate(
-                        { type: "focus", id: r.id, focus_pct },
-                        () => setFocus(userId, { id: r.id, focus_pct }),
-                        `Couldn't rate "${r.goal}".`,
-                      );
-                    }}
-                    value={r.focus_pct ?? ""}
-                  >
-                    <option value="">FOCUS –</option>
-                    {FOCUS_STEPS.map((f) => (
-                      <option key={f} value={f}>
-                        FOCUS {f}%
-                      </option>
-                    ))}
-                  </select>
+                  {r.activity_focus_pct != null ? (
+                    <span className="font-mono text-xs text-cream tabular-nums" title="Measured from activity samples">
+                      FOCUS {r.activity_focus_pct}%
+                    </span>
+                  ) : (
+                    <select
+                      aria-label={`Focus for ${r.goal}`}
+                      className={`${quiet} ${r.focus_pct == null ? "" : "text-cream"}`}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => {
+                        const focus_pct =
+                          e.target.value === "" ? null : Number(e.target.value);
+                        mutate(
+                          { type: "focus", id: r.id, focus_pct },
+                          () => setFocus(userId, { id: r.id, focus_pct }),
+                          `Couldn't rate "${r.goal}".`,
+                        );
+                      }}
+                      value={r.focus_pct ?? ""}
+                    >
+                      <option value="">FOCUS –</option>
+                      {FOCUS_STEPS.map((f) => (
+                        <option key={f} value={f}>
+                          FOCUS {f}%
+                        </option>
+                      ))}
+                    </select>
+                  )}
                   <span className="text-xs text-mist">
                     <LocalTime date={r.started_at} />
                   </span>

@@ -42,8 +42,11 @@ export function SessionDrawer({
 }) {
   const [draft, setDraft] = useState<SessionEdit>(() => ({ ...row }));
   const [cursor, setCursor] = useState(0);
-  const [editing, setEditing] = useState(false);
+  const [isEditing, setEditing] = useState(false);
   const field = FIELDS[cursor];
+  const measuredFocus = row.activity_focus_pct;
+  const focusReadOnly = measuredFocus != null;
+  const editing = isEditing && (field !== "focus" || !focusReadOnly);
   const inputs = useRef<
     Partial<Record<Field, HTMLInputElement | HTMLTextAreaElement | null>>
   >({});
@@ -52,8 +55,8 @@ export function SessionDrawer({
 
   const set = <K extends keyof SessionEdit>(k: K, v: SessionEdit[K]) =>
     setDraft((d) => ({ ...d, [k]: v }));
-  const state = useRef({ draft, cursor, editing, field });
-  state.current = { draft, cursor, editing, field };
+  const state = useRef({ draft, cursor, editing, field, focusReadOnly });
+  state.current = { draft, cursor, editing, field, focusReadOnly };
   const close = () => {
     const d = state.current.draft;
     onClose(
@@ -65,7 +68,7 @@ export function SessionDrawer({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const { cursor, editing, field } = state.current;
+      const { cursor, editing, field, focusReadOnly } = state.current;
       if (e.key === "Enter" && (e.metaKey || e.ctrlKey))
         return (e.preventDefault(), closeRef.current());
       if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -96,7 +99,8 @@ export function SessionDrawer({
         setCursor(Math.min(cursor + 1, FIELDS.length - 1));
       else if (e.key === "k" || e.key === "ArrowUp")
         setCursor(Math.max(cursor - 1, 0));
-      else if (e.key === "Enter" || e.key === "i") setEditing(true);
+      else if (e.key === "Enter" || e.key === "i")
+        setEditing(field !== "focus" || !focusReadOnly);
       else if (e.key === "Escape") closeRef.current();
       else return;
       e.preventDefault();
@@ -146,14 +150,15 @@ export function SessionDrawer({
   // every keystroke.
   const line = (i: number, label: string, children: ReactNode) => {
     const active = i === cursor;
+    const editable = FIELDS[i] !== "focus" || !focusReadOnly;
     return (
       <div
-        className="grid cursor-pointer grid-cols-[5.5rem_1fr] items-baseline gap-4 py-3"
+        className={`grid grid-cols-[5.5rem_1fr] items-baseline gap-4 py-3 ${editable ? "cursor-pointer" : ""}`}
         data-active={active}
         data-field={FIELDS[i]}
         onClick={() => {
           setCursor(i);
-          setEditing(true);
+          setEditing(editable);
         }}
       >
         <span
@@ -319,7 +324,11 @@ export function SessionDrawer({
         {line(
           3,
           "Focus",
-          enumValue("focus"),
+          measuredFocus == null ? enumValue("focus") : (
+            <span className="text-cream tabular-nums" title="Measured from activity samples">
+              {measuredFocus}%
+            </span>
+          ),
         )}
         <div className="grid grid-cols-[5.5rem_1fr] items-baseline gap-4 py-3">
           <span className="font-mono text-[11px] uppercase text-mist">Started</span>

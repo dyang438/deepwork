@@ -88,36 +88,72 @@ if (typeof chrome !== "undefined" && chrome.storage) {
   const guard = makeMediaGuard(document, window.MutationObserver);
   const CHECKING = "Deep work session running. Checking whether this video is informative…";
   const cover = makeCover(document, window.MutationObserver, CHECKING);
-  let active = false;
+  let endTs = null;
+  let expiryTimer;
+  let refreshTimer;
   let passed = false;   // the latest verdict for this tab let the page through
   let verdict = null;   // top frame: { url, allow } once the current URL is judged
-  let judging = null;   // top frame: URL being judged
+  let judging = null;   // top frame: pending verdict request
   let lastTitle = null; // top frame: title sent with the previous verdict
+  const active = () => endTs !== null && Date.now() < endTs * 1000;
+  const refresh = () => chrome.runtime.sendMessage({ type: "deepwork-refresh" }).catch(() => {});
   const hit = () => chrome.runtime.sendMessage({ type: "deepwork-hit", domain: location.hostname, kind: "cover" }).catch(() => {});
-  // Switching back to a covered tab counts as another attempt, and re-raises the cover.
+  function applyState(state) {
+    const nextEnd = state?.active && state.end_ts * 1000 > Date.now() ? state.end_ts : null;
+    if (nextEnd === endTs) return;
+    endTs = nextEnd;
+    clearTimeout(expiryTimer);
+    clearInterval(refreshTimer);
+    passed = false;
+    verdict = judging = lastTitle = null;
+    if (endTs !== null) {
+      const expire = () => {
+        const remaining = endTs * 1000 - Date.now();
+        if (remaining <= 0) applyState(null);
+        else expiryTimer = setTimeout(expire, Math.min(remaining, 2147483647));
+      };
+      expire();
+      // The deadline is enough for timer expiry. Early stops still need fresh local state.
+      if (top) refreshTimer = setInterval(() => {
+        if (document.visibilityState === "visible") refresh();
+      }, 2000);
+    }
+    render();
+  }
+  // Catch up immediately when a hidden or restored page comes back.
   document.addEventListener("visibilitychange", () => {
-    if (top && active && document.visibilityState === "visible" && cover.el && verdict) { hit(); cover.raise(); }
+    if (document.visibilityState !== "visible") return;
+    render();
+    if (!top) return;
+    refresh();
+    if (active() && cover.el && verdict) hit();
   });
+  window.addEventListener("pageshow", () => { render(); if (top) refresh(); });
   function judge(url) {
-    judging = url;
+    const request = { url, end_ts: endTs };
+    judging = request;
     const t0 = Date.now();
     // Wait for a title; after a same-page navigation it still shows the previous page for a moment.
     const ready = () => SOCIAL || Date.now() - t0 > 3000 ||
       (document.readyState !== "loading" && document.title && document.title !== lastTitle);
     const go = () => {
-      if (pageKey() !== url || !active) { judging = null; return render(); }
+      if (judging !== request) return;
+      if (pageKey() !== url || !active()) { judging = null; return render(); }
       if (!ready()) return setTimeout(go, 200);
       const d = document.querySelector('meta[name="description"], meta[property="og:description"]');
       // X and LinkedIn are never sent to the model: deepwork only answers whether they were overridden.
       const page = SOCIAL ? { url, judge: false } : { url, title: document.title, description: d ? d.content : "" };
       lastTitle = page.title;
-      chrome.runtime.sendMessage({ type: "deepwork-judge", page }).then((r) => {
+      const finish = (allow) => {
+        if (judging !== request) return;
         judging = null;
-        if (pageKey() !== url) return render();
-        verdict = { url, allow: !!(r && r.allow) };
-        if (!verdict.allow && active) hit();
+        if (pageKey() !== url || !active()) return render();
+        verdict = { url, allow };
+        if (!allow) hit();
         render();
-      }).catch(() => { judging = null; verdict = { url, allow: false }; render(); });
+      };
+      chrome.runtime.sendMessage({ type: "deepwork-judge", page, end_ts: request.end_ts })
+        .then((r) => finish(!!r?.allow), () => finish(false));
     };
     go();
   }
@@ -134,7 +170,8 @@ if (typeof chrome !== "undefined" && chrome.storage) {
       "background:transparent;color:#bbb;font:500 14px -apple-system,system-ui,sans-serif;cursor:pointer;");
     btn.addEventListener("click", () => {
       const url = pageKey();
-      chrome.runtime.sendMessage({ type: "deepwork-override", url }).catch(() => {});
+      chrome.runtime.sendMessage({ type: "deepwork-override", url, end_ts: endTs }).catch(() => {});
+      judging = null;
       verdict = { url, allow: true };
       render();
     });
@@ -143,30 +180,32 @@ if (typeof chrome !== "undefined" && chrome.storage) {
     el.append(box);
   }
   function render() {
+    if (endTs !== null && !active()) return applyState(null);
+    const running = endTs !== null;
     const judged = !!verdict && verdict.url === pageKey();
-    if (top) passed = active && judged && verdict.allow;
-    if (active && !passed) guard.enable(); else guard.disable();
+    if (top) passed = running && judged && verdict.allow;
+    if (running && !passed) guard.enable(); else guard.disable();
     if (!top) return;  // subframes only pause media; the cover and the verdict live in the top frame
-    if (!active) { verdict = null; return cover.hide(); }
+    if (!running) return cover.hide();
     if (passed) return cover.hide();
     if (!cover.show()) cover.raise();
     if (judged) blockedCover(cover.el);
     else if (cover.el.dataset.blocked || !cover.el.textContent) { delete cover.el.dataset.blocked; cover.el.textContent = CHECKING; }
-    if (!judged && judging !== pageKey()) judge(pageKey());
+    if (!judged && judging?.url !== pageKey()) judge(pageKey());
   }
-  chrome.storage.local.get("deepwork", (v) => { active = !!(v.deepwork && v.deepwork.active); render(); });
+  chrome.storage.local.get("deepwork", (v) => applyState(v.deepwork));
   chrome.storage.onChanged.addListener((ch) => {
-    if (ch.deepwork) { active = !!(ch.deepwork.newValue && ch.deepwork.newValue.active); render(); }
+    if (ch.deepwork) applyState(ch.deepwork.newValue);
   });
   // The background relays each verdict to every frame of the tab, so subframes stop pausing media too.
   chrome.runtime.onMessage.addListener((msg) => {
-    if (msg && msg.type === "deepwork-verdict" && !top) { passed = !!msg.allow; render(); }
+    if (msg?.type === "deepwork-verdict" && !top && active() && msg.end_ts === endTs) { passed = !!msg.allow; render(); }
   });
   document.addEventListener("DOMContentLoaded", render);
   window.addEventListener("load", render);
   if (top) {
     let href = location.href;
     setInterval(() => { if (location.href !== href) { href = location.href; render(); } }, 500);
-    chrome.runtime.sendMessage({ type: "deepwork-refresh" }).catch(() => {});
+    refresh();
   }
 }

@@ -12,8 +12,10 @@ export type LeaderRow = {
   display_name: string;
   minutes: number;
   sessions: number;
-  avg_focus: number | null; // minute-weighted average of the sessions that have a self-reported focus
+  avg_focus: number | null; // minute-weighted average of sessions with a focus score
 };
+
+const SESSION_FOCUS = "COALESCE(s.activity_focus_pct, s.focus_pct)";
 
 // The only place the leaderboard SQL lives, so the server read, the seal and every renewal match.
 // Authorized in the query: rows come back only while $2 is a member of competition $1.
@@ -21,7 +23,7 @@ const LEADERBOARD_SQL = `
   SELECT m.user_id, m.display_name,
          COALESCE(SUM(s.minutes), 0)::int AS minutes,
          COUNT(s.id)::int AS sessions,
-         ROUND(SUM(s.minutes * s.focus_pct)::numeric / NULLIF(SUM(s.minutes) FILTER (WHERE s.focus_pct IS NOT NULL), 0))::int AS avg_focus
+         ROUND(SUM(s.minutes * ${SESSION_FOCUS})::numeric / NULLIF(SUM(s.minutes) FILTER (WHERE ${SESSION_FOCUS} IS NOT NULL), 0))::int AS avg_focus
   FROM competition_members m
   JOIN competitions c ON c.id = m.competition_id
   LEFT JOIN deep_sessions s ON s.user_id = m.user_id AND s.started_at >= c.starts_at

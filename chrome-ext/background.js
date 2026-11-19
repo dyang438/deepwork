@@ -4,17 +4,24 @@
 // While sampling, it reports the active tab's DOMAIN only (no path, query or title) and counts block hits.
 // A covered page's URL and title go to the local deepwork only to ask whether it looks like work (/judge).
 const BASE = "http://127.0.0.1:47615";
+let refreshPending;
 
 async function getState() {
   const v = await chrome.storage.local.get("deepwork");
   return v.deepwork || { active: false, sampling: false };
 }
 
-async function refresh() {
+function refresh() {
+  // Alarms and open tabs share one refresh so old responses can't overwrite newer ones.
+  refreshPending ??= refreshState().finally(() => { refreshPending = null; });
+  return refreshPending;
+}
+
+async function refreshState() {
   const prev = await getState();
   let state = { active: false, sampling: false, goal: null, end_ts: null };
   try {
-    const r = await fetch(BASE + "/state", { cache: "no-store" });
+    const r = await fetch(BASE + "/state", { cache: "no-store", signal: AbortSignal.timeout(2000) });
     if (r.ok) state = await r.json();
   } catch (e) { /* no session running */ }
   if (state.end_ts && Date.now() / 1000 >= state.end_ts) { state.active = false; state.sampling = false; }
@@ -71,13 +78,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg.type === "deepwork-refresh") { refresh().then(reply); return true; }
   if (msg.type === "deepwork-override") {
     post("/override", { url: msg.url });
-    if (_sender.tab) chrome.tabs.sendMessage(_sender.tab.id, { type: "deepwork-verdict", allow: true }).catch(() => {});
+    if (_sender.tab) chrome.tabs.sendMessage(_sender.tab.id, { type: "deepwork-verdict", allow: true, end_ts: msg.end_ts }).catch(() => {});
     return;
   }
   if (msg.type === "deepwork-judge") {
     judge(msg.page || {}).then((allow) => {
       reply({ allow });
-      if (_sender.tab) chrome.tabs.sendMessage(_sender.tab.id, { type: "deepwork-verdict", allow }).catch(() => {});
+      if (_sender.tab) chrome.tabs.sendMessage(_sender.tab.id, { type: "deepwork-verdict", allow, end_ts: msg.end_ts }).catch(() => {});
     });
     return true;
   }

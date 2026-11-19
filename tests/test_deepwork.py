@@ -333,6 +333,8 @@ class TestStore(Base):
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.addCleanup(srv.shutdown)
         self.env["DEEPWORK_SERVER"] = "http://127.0.0.1:%d" % srv.server_port
+        os.makedirs(self.path("state"))
+        dw.write_json(self.path("state", "config.json"), {"tracking": False})
 
         r = self.run_cli("login")
         self.assertIn("Your code: ABCD-EFGH", r.stdout)
@@ -345,13 +347,24 @@ class TestStore(Base):
         time.sleep(1.5)  # the watchdog announces the session
         put = [c for c in calls if c[:2] == ("PUT", "/api/cli/active")]
         self.assertEqual(put[0][3]["goal"], "web block")
+        samples_path = dw.read_json(self.path("state", "session.json"))["samples_path"]
+        with open(samples_path, "w") as f:
+            f.write(json.dumps({"type": "sample", "active": False}) + "\n")
         r = self.run_cli("off", stdin="")
         self.assertIn("On your deepwork.garden dashboard.", r.stdout)
+        self.assertNotIn("How focused were you", r.stdout)
         self.assertTrue(any(c[:2] == ("DELETE", "/api/cli/active") for c in calls))
         up = [c for c in calls if c[1] == "/api/cli/sessions"][-1][3]["sessions"]
         self.assertEqual((len(up), up[0]["goal"], up[0]["outcome"]), (1, "web block", "not done"))
-        self.assertEqual(self.run_cli("sync").stdout.strip(), "Synced 1 session(s) to deepwork.garden.")
-        self.assertEqual(up[0]["id"], [c for c in calls if c[1] == "/api/cli/sessions"][-1][3]["sessions"][0]["id"])
+        self.assertEqual((up[0]["activity_focus_pct"], up[0]["focus_pct"]), (0, None))
+
+        self.run_cli("10", "-y", "-g", "unsampled block")
+        r = self.run_cli("off", stdin="y\n\n\n\n80\n")
+        self.assertIn("How focused were you", r.stdout)
+        self.assertEqual(self.run_cli("sync").stdout.strip(), "Synced 2 session(s) to deepwork.garden.")
+        synced = [c for c in calls if c[1] == "/api/cli/sessions"][-1][3]["sessions"]
+        self.assertEqual(up[0], synced[0])
+        self.assertEqual((synced[1]["activity_focus_pct"], synced[1]["focus_pct"]), (None, 80))
 
         r = self.run_cli("capture", "rate", "limits")
         self.assertIn("also on your deepwork.garden notepad", r.stdout)

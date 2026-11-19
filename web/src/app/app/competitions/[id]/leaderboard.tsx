@@ -77,7 +77,7 @@ export function Leaderboard({
           </li>
         ))}
       </ol>
-      <p className="mt-3 text-xs text-mist">Counts sessions since the competition started. Focus is self-reported per session; rate yours on the Personal tab.</p>
+      <p className="mt-3 text-xs text-mist">Counts sessions since the competition started. Focus uses activity samples when available and manual ratings otherwise.</p>
     </section>
   );
 }

@@ -1,6 +1,6 @@
 log.jsonl
 capture.md
-sessions/
+/sessions/
 tests/live-test-log.jsonl
 chrome-ext/_metadata/
 __pycache__/

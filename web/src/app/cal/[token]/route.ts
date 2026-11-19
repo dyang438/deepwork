@@ -22,7 +22,8 @@ export async function GET(_request: Request, { params }: { params: Promise<{ tok
   const now = stamp(new Date());
   const events = rows.map((r) => {
     const end = new Date(r.started_at.getTime() + Math.max(r.minutes, 1) * 60_000);
-    const desc = [`${r.minutes} min · ${r.outcome}`, r.focus_pct != null ? `focus ${r.focus_pct}%` : "", r.notes ?? ""]
+    const focus = r.activity_focus_pct ?? r.focus_pct;
+    const desc = [`${r.minutes} min · ${r.outcome}`, focus != null ? `focus ${focus}%` : "", r.notes ?? ""]
       .filter(Boolean)
       .join("\n");
     return [

@@ -13,7 +13,8 @@ export const deepSessions = pgTable(
     goal: text("goal").notNull(),
     minutes: integer("minutes").notNull(),
     outcome: text("outcome").notNull(), // done | partial | not done
-    focus_pct: integer("focus_pct"), // self-reported focus, 0-100; null until rated
+    focus_pct: integer("focus_pct"), // manual rating used when no activity score is available
+    activity_focus_pct: integer("activity_focus_pct"), // percentage of active CLI samples
     notes: text("notes"), // free-form, edited in the session drawer
     started_at: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -45,7 +46,7 @@ export const cliTokens = pgTable("cli_tokens", {
   last_used_at: timestamp("last_used_at", { withTimezone: true }),
 });
 
-// Competitions: members' deep hours and self-reported focus since starts_at, shown as a live leaderboard.
+// Competitions: members' deep hours and focus since starts_at, shown as a live leaderboard.
 export const competitions = pgTable("competitions", {
   id: uuid("id").primaryKey(),
   name: text("name").notNull(),

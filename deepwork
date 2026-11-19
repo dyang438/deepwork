@@ -16,7 +16,9 @@
 Flags: -y (skip questions), -g "goal", -d (return right away instead of counting down here), --dry-run (no apps quit, no DND, isolated state in ~/.deepwork-dryrun).
 """
 import collections
+import contextlib
 import datetime as dt
+import fcntl
 import http.server
 import json
 import os
@@ -29,6 +31,7 @@ import socketserver
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -82,10 +85,15 @@ def read_json(path):
 
 
 def write_json(path, obj):
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(obj, f, indent=2)
-    os.replace(tmp, path)
+    # Separate writers must never share a temporary file.
+    with tempfile.NamedTemporaryFile(mode="w", dir=os.path.dirname(path), delete=False) as f:
+        tmp = f.name
+        try:
+            json.dump(obj, f, indent=2)
+            f.flush()
+            os.replace(tmp, path)
+        finally:
+            rm(tmp)
 
 
 def read_jsonl(path):
@@ -139,6 +147,25 @@ def pid_alive(pid):
         return True
     except (ProcessLookupError, PermissionError, TypeError):
         return False
+
+
+@contextlib.contextmanager
+def session_lock(cfg):
+    os.makedirs(cfg.state, exist_ok=True)
+    with open(os.path.join(cfg.state, "lifecycle.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def session_minutes(record):
+    minutes = max(0, float(record.get("minutes") or 0))
+    # Older watchdogs counted the hours spent asleep or waiting for recovery as deep work.
+    if record.get("ended_by") == "timer" and record.get("planned_minutes") is not None:
+        minutes = min(minutes, max(0, float(record["planned_minutes"])))
+    return minutes
 
 
 # ---------- configuration ----------
@@ -223,7 +250,9 @@ class Web:
                                              "ends_at": iso(s["end"])}, timeout=4)
 
     def clear(self):
-        self.call("DELETE", "/api/cli/active", timeout=4)
+        code, body = self.call("DELETE", "/api/cli/active", timeout=4)
+        if code != 200:
+            raise RuntimeError("deepwork.garden couldn't clear the session (%s): %s" % (code, body.get("error")))
 
     def notepad(self, lines):
         code, body = self.call("POST", "/api/cli/notepad", {"lines": lines}, timeout=4)
@@ -232,9 +261,10 @@ class Web:
 
     def sync(self, records):
         rows = [{"id": str(uuid.uuid5(uuid.NAMESPACE_URL, "deepwork:" + record_id(r))),
-                 "goal": (r.get("goal") or "(none given)")[:200], "minutes": int(round(float(r.get("minutes") or 0))),
+                 "goal": (r.get("goal") or "(none given)")[:200], "minutes": int(round(session_minutes(r))),
                  "outcome": r.get("outcome") if r.get("outcome") in ("done", "partial", "not done") else "unrecorded",
-                 "started_at": r["start"], "focus_pct": r.get("focus_pct")}
+                 "started_at": r["start"], "focus_pct": r.get("focus_pct"),
+                 "activity_focus_pct": activity_focus_pct(r.get("activity"))}
                 for r in records if r.get("kind", "deep") == "deep" and r.get("start")]
         code, body = self.call("POST", "/api/cli/sessions", {"sessions": rows}, timeout=20)
         if code != 200:
@@ -283,6 +313,8 @@ def agent(cfg):
     every = float(os.environ.get("DEEPWORK_AGENT_EVERY", "3"))
     me = [sys.executable, os.path.realpath(__file__)] + (["--dry-run"] if cfg.dry else [])
     print("%s agent up on %s" % (iso(now()), socket.gethostname()), flush=True)
+    # Local deadlines must still work while DNS, login or the web server is down.
+    threading.Thread(target=supervise_sessions, args=(cfg,), daemon=True).start()
     while True:
         cfg.web = Web(cfg)  # re-read credentials, so a new `deepwork login` is picked up
         if not cfg.web.enabled:
@@ -424,14 +456,28 @@ on conflict (id) do update set record = excluded.record, who = excluded.who, sta
 
 # ---------- side effects (all routed through act) ----------
 
-def act(cfg, kind, *args):
+def act(cfg, kind, *args, deadline=None):
     """Run a system action, or record it when dry."""
     if cfg.dry:
         with open(cfg.actions, "a") as f:
             f.write("%s %s %s\n" % (iso(now()), kind, " ".join(args)))
-        return
-    run = lambda *cmd, t=10: subprocess.run(list(cmd), capture_output=True, timeout=t)
-    running = lambda app: subprocess.run(["pgrep", "-xq", app]).returncode == 0
+        return True
+    def run(*cmd, t=10, text=False, check=True):
+        if deadline is not None:
+            t = min(t, deadline - now())
+            if t <= 0:
+                raise TimeoutError("session deadline reached")
+        r = subprocess.run(list(cmd), capture_output=True, timeout=t, text=text)
+        if check and r.returncode != 0:
+            error = r.stderr if text else r.stderr.decode(errors="replace")
+            raise RuntimeError("%s exited %d: %s" % (cmd[0], r.returncode, error.strip()[:300]))
+        return r
+
+    def running(app):
+        r = run("pgrep", "-xq", app, t=2, check=False)
+        if r.returncode not in (0, 1):
+            raise RuntimeError("pgrep couldn't inspect running apps")
+        return r.returncode == 0
     try:
         if kind == "quit":
             if running(args[0]):
@@ -439,8 +485,11 @@ def act(cfg, kind, *args):
         elif kind == "open":
             run("open", "-g", "-a", args[0])
         elif kind == "shortcut":
-            names = subprocess.run(["shortcuts", "list"], capture_output=True, text=True, timeout=15).stdout
-            if args[0] in names.splitlines():
+            names = run("shortcuts", "list", t=15, text=True).stdout
+            names = names.splitlines()
+            if args[0] == SHORTCUT_OFF and SHORTCUT_OFF not in names and SHORTCUT_ON in names:
+                raise RuntimeError("deepwork-off is missing; Focus restoration will retry")
+            elif args[0] in names:
                 run("shortcuts", "run", args[0], t=30)
         elif kind == "notify":
             snd = cfg.conf["sounds"].get("notify")
@@ -457,16 +506,26 @@ def act(cfg, kind, *args):
                     run("osascript", "-e", 'tell application "%s" to pause' % app)
         elif kind == "terminal":
             # Opening a .command file needs no Automation permission (no AppleScript).
-            if run("open", args[0], t=30).returncode != 0:
+            if run("open", args[0], t=30, check=False).returncode != 0:
                 act(cfg, "notify", "Session over. Open a terminal and run: deepwork off")
+        return True
     except Exception as e:  # never let a side effect crash the session
         sys.stderr.write("deepwork: %s failed: %s\n" % (kind, e))
+        return False
 
 
 def running_apps(cfg):
     if cfg.dry:
         return list(cfg.apps)
-    return [a for a in cfg.apps if subprocess.run(["pgrep", "-xq", a]).returncode == 0]
+    apps = []
+    for a in cfg.apps:
+        try:
+            r = subprocess.run(["pgrep", "-xq", a], timeout=2, capture_output=True)
+            if r.returncode != 1:
+                apps.append(a)  # restore the app if macOS couldn't determine whether it was running
+        except subprocess.TimeoutExpired:
+            apps.append(a)
+    return apps
 
 
 def shutdown_command(cfg):
@@ -482,13 +541,22 @@ def shutdown_command(cfg):
 
 def start(cfg, minutes, assume_yes, goal, detach=False, from_web=False):
     cfg.ensure_dirs()
-    if os.path.exists(cfg.session):
-        s = read_json(cfg.session) or {}
-        sys.exit("A session is already running until %s. Use: deepwork status / deepwork off" % hm(s.get("end", 0)))
     if os.path.exists(cfg.pending):
         print("The last session never got its shutdown. Doing that first.")
         shutdown(cfg, assume_yes)
+    with session_lock(cfg):
+        if os.path.exists(cfg.pending):
+            sys.exit("The last session still needs restoration. Run: deepwork off")
+        session, foreground = _start(cfg, minutes, assume_yes, goal, detach, from_web)
+    if foreground:
+        print('Stray thought? deepwork capture "..." from another terminal.   Ctrl-C ends early.')
+        wait_here(cfg, session, assume_yes)
 
+
+def _start(cfg, minutes, assume_yes, goal, detach, from_web):
+    if os.path.exists(cfg.session):
+        s = read_json(cfg.session) or {}
+        sys.exit("A session is already running until %s. Use: deepwork status / deepwork off" % hm(s.get("end", 0)))
     start_ts = now()
     end_ts = start_ts + minutes * 60
     deadline, checklist, answers = hm(end_ts), {}, {}
@@ -513,34 +581,39 @@ def start(cfg, minutes, assume_yes, goal, detach=False, from_web=False):
         "answers": answers, "apps_running": running_apps(cfg),
         "samples_path": os.path.join(cfg.sessions, dt.datetime.fromtimestamp(start_ts).strftime("%Y-%m-%dT%H%M%S") + ".jsonl"),
     }
+    foreground = not detach and sys.stdin.isatty() and sys.stdout.isatty()
+    if from_web:
+        session["from_web"] = True
+    if foreground:
+        session["fg_pid"] = os.getpid()
     write_json(cfg.session, session)
     for a in cfg.apps:
-        act(cfg, "quit", a)
+        act(cfg, "quit", a, deadline=end_ts)
     if cfg.conf.get("music_pause"):
         act(cfg, "music_pause")
     if cfg.conf["sounds"].get("start"):
         act(cfg, "sound", cfg.conf["sounds"]["start"])
-    act(cfg, "shortcut", SHORTCUT_ON)
-    foreground = not detach and sys.stdin.isatty() and sys.stdout.isatty()
-    if from_web:
-        session["from_web"] = True  # nobody is at a terminal: the watchdog logs it when it ends
-    if foreground:
-        session["fg_pid"] = os.getpid()  # the watchdog leaves the shutdown to this terminal while it is alive
+    act(cfg, "shortcut", SHORTCUT_ON, deadline=end_ts)
     session["watchdog_pid"] = spawn_watchdog(cfg)
     write_json(cfg.session, session)
     print("Deep work until %s (%g min). Goal: %s%s" % (hm(end_ts), minutes, session["goal"],
                                                        "  [dry run]" if cfg.dry else ""))
     if not foreground:
-        return print('Stray thought? deepwork capture "..."   Stop early: deepwork off')
-    print('Stray thought? deepwork capture "..." from another terminal.   Ctrl-C ends early.')
-    wait_here(cfg, session, assume_yes)
+        print('Stray thought? deepwork capture "..."   Stop early: deepwork off')
+    return session, foreground
 
 
 def wait_here(cfg, s, assume_yes):
     """Count down in this terminal, then run the shutdown questions here when the watchdog ends the block."""
     try:
         while os.path.exists(cfg.session):
+            current = read_json(cfg.session)
+            if not current or current.get("start") != s["start"]:
+                break
             left = max(0, s["end"] - now())
+            if left <= 0:
+                finish_expired(cfg, s)
+                break
             sys.stdout.write("\r  %s left   " % ("%d:%02d:%02d" % (left // 3600, left % 3600 // 60, left % 60)
                                                 if left >= 3600 else "%02d:%02d" % (left // 60, left % 60)))
             sys.stdout.flush()
@@ -553,24 +626,95 @@ def wait_here(cfg, s, assume_yes):
         shutdown(cfg, assume_yes)
 
 
-def claim_and_restore(cfg, ended_by):
+def claim_and_restore(cfg, ended_by, expected_start=None):
     """Atomically move session.json to pending.json; only the winner restores the machine."""
-    try:
+    with session_lock(cfg):
+        s = read_json(cfg.session)
+        if not s or (expected_start is not None and s.get("start") != expected_start):
+            return False
+        s.update(ended=min(now(), s["end"]) if ended_by == "timer" else now(), ended_by=ended_by)
+        write_json(cfg.session, s)
         os.rename(cfg.session, cfg.pending)
-    except FileNotFoundError:
-        return False
-    s = read_json(cfg.pending) or {}
-    s.update(ended=now(), ended_by=ended_by)
+        restore_pending(cfg)
+        return True
+
+
+def restore_pending(cfg):
+    """Caller holds the lifecycle lock. Persist progress so a crash or failed Shortcut is retried."""
+    s = read_json(cfg.pending)
+    if not s or s.get("restored"):
+        return s
+    if not s.get("focus_restored"):
+        s["focus_restored"] = act(cfg, "shortcut", SHORTCUT_OFF)
+        write_json(cfg.pending, s)
+    restored_apps = s.setdefault("restored_apps", [])
+    for a in s.get("apps_running", cfg.apps):
+        if a not in restored_apps and act(cfg, "open", a):
+            restored_apps.append(a)
+            write_json(cfg.pending, s)
+    s["restored"] = s["focus_restored"] and all(a in restored_apps for a in s.get("apps_running", cfg.apps))
     write_json(cfg.pending, s)
-    if cfg.web.enabled:
+    # Restore the Mac before attempting any network requests.
+    if s["restored"] and cfg.web.enabled:
         try:
             cfg.web.clear()
         except Exception as e:
             sys.stderr.write("deepwork: couldn't clear the live session on deepwork.garden: %s\n" % e)
-    act(cfg, "shortcut", SHORTCUT_OFF)
-    for a in s.get("apps_running", cfg.apps):
-        act(cfg, "open", a)
-    return True
+    return s
+
+
+def finish_expired(cfg, s):
+    if claim_and_restore(cfg, "timer", expected_start=s["start"]):
+        announce_end(cfg)
+
+
+def announce_end(cfg):
+    with session_lock(cfg):
+        s = restore_pending(cfg)
+        if not s or not s.get("restored"):
+            return
+        if s.get("notified") and not s.get("from_web"):
+            return
+        notify = not s.get("notified")
+        s["notified"] = True
+        write_json(cfg.pending, s)
+    if s.get("from_web"):
+        shutdown(cfg, True)
+        if notify:
+            act(cfg, "notify", "Time is up: %s. Review it on deepwork.garden." % s.get("goal"))
+    elif notify and pid_alive(s.get("fg_pid")):
+        act(cfg, "notify", "Time is up: %s." % s.get("goal"))
+    elif notify:
+        act(cfg, "notify", "Time is up: %s. Run deepwork off for the shutdown." % s.get("goal"))
+        act(cfg, "terminal", shutdown_command(cfg))
+
+
+def recover_session(cfg):
+    with session_lock(cfg):
+        s = read_json(cfg.session)
+        if s and now() < s["end"]:
+            if not pid_alive(s.get("watchdog_pid")):
+                s["watchdog_pid"] = spawn_watchdog(cfg)
+                write_json(cfg.session, s)
+                print("%s Restarted the watchdog." % iso(now()), flush=True)
+            return
+        if not s:
+            pending = restore_pending(cfg)
+        else:
+            pending = None
+    if s:
+        finish_expired(cfg, s)
+    elif pending and pending.get("ended_by") == "timer":
+        announce_end(cfg)
+
+
+def supervise_sessions(cfg):
+    while True:
+        try:
+            recover_session(cfg)
+        except Exception as e:
+            print("%s session recovery failed: %s" % (iso(now()), e), flush=True)
+        time.sleep(1)
 
 
 def off(cfg, assume_yes):
@@ -584,7 +728,7 @@ def off(cfg, assume_yes):
                 if not pid_alive(pid):
                     break
                 time.sleep(0.1)
-        claim_and_restore(cfg, "off")
+        claim_and_restore(cfg, "timer" if now() >= s["end"] else "off", expected_start=s["start"])
     if not os.path.exists(cfg.pending):
         return print("No session to shut down.")
     shutdown(cfg, assume_yes)
@@ -593,10 +737,14 @@ def off(cfg, assume_yes):
 def shutdown(cfg, assume_yes):
     # Claim the pending session atomically so two shutdowns (the popup and a manual one) never collide.
     claimed = os.path.join(cfg.state, "shutdown-%d.json" % os.getpid())
-    try:
-        os.rename(cfg.pending, claimed)
-    except FileNotFoundError:
-        return print("No session to shut down (another shutdown already handled it).")
+    with session_lock(cfg):
+        s = restore_pending(cfg)
+        if s and not s.get("restored"):
+            return print("Restoration incomplete; the agent will retry. You can also run: deepwork off")
+        try:
+            os.rename(cfg.pending, claimed)
+        except FileNotFoundError:
+            return print("No session to shut down (another shutdown already handled it).")
     try:
         _shutdown(cfg, assume_yes, read_json(claimed) or {})
     except BaseException:
@@ -608,6 +756,7 @@ def shutdown(cfg, assume_yes):
 
 def _shutdown(cfg, assume_yes, s):
     ended = s.get("ended", now())
+    activity = summarize(read_jsonl(s["samples_path"])) if s.get("samples_path") else None
     outcome, done, loops, tomorrow, answers = "unrecorded", "", [], "", dict(s.get("answers") or {})
     focus = None
     q = cfg.conf["shutdown_questions"]
@@ -627,7 +776,7 @@ def _shutdown(cfg, assume_yes, s):
                 loops.append(line)
         if q.get("tomorrow"):
             tomorrow = ask(q["tomorrow"])
-        if q.get("focus"):
+        if q.get("focus") and activity_focus_pct(activity) is None:
             f = ask(q["focus"]).rstrip("%").strip()
             focus = max(0, min(100, int(f))) if f.isdigit() else None
         for c in q.get("custom") or []:
@@ -642,7 +791,7 @@ def _shutdown(cfg, assume_yes, s):
         "outcome": outcome, "done": done, "open_loops": loops, "tomorrow": tomorrow, "answers": answers,
         "focus_pct": focus,
         "ended_by": s.get("ended_by", "off"),
-        "activity": summarize(read_jsonl(s["samples_path"])) if s.get("samples_path") else None,
+        "activity": activity,
     }
     rec["id"] = record_id(rec)
     note = cfg.store.add(rec)
@@ -670,6 +819,7 @@ def append_capture(cfg, texts, tag="capture"):
 
 
 def status(cfg):
+    recover_session(cfg)
     s = read_json(cfg.session)
     if not s:
         return print("Session ended; shutdown not done yet. Run: deepwork off" if os.path.exists(cfg.pending)
@@ -678,10 +828,6 @@ def status(cfg):
     print("Deep work until %s (%.0f min left). Goal: %s" % (hm(s["end"]), max(0, s["end"] - now()) / 60, s["goal"]))
     print("Deadline: %s   Watchdog: %s   Extension endpoint: %s" % (
         s.get("deadline"), "running" if alive else "DEAD", "up" if endpoint_up(cfg) else "down"))
-    if not alive:
-        s["watchdog_pid"] = spawn_watchdog(cfg)
-        write_json(cfg.session, s)
-        print("Restarted the watchdog.")
 
 
 def endpoint_up(cfg):
@@ -727,14 +873,19 @@ def summarize(events):
     }
 
 
+def activity_focus_pct(activity):
+    ratio = (activity or {}).get("focus_ratio")
+    return round(ratio * 100) if ratio is not None else None
+
+
 def session_line(r):
     a = r.get("activity") or {}
     when = r["start"][:16].replace("T", " ")
     if not a.get("samples"):
-        return "  %s  %4.0f min  %s  (no activity data)" % (when, r.get("minutes") or 0, r.get("goal"))
+        return "  %s  %4.0f min  %s  (no activity data)" % (when, session_minutes(r), r.get("goal"))
     top = ", ".join("%s %d" % kv for kv in list(a["blocked_attempts"].items())[:3]) or "none"
     return "  %s  %4.0f min  focus %3.0f%%  %4.1f app sw/h  %4.1f site sw/h  longest %4.1f min  blocked: %s  | %s" % (
-        when, r.get("minutes") or 0, 100 * (a["focus_ratio"] or 0), a["app_switches_per_h"],
+        when, session_minutes(r), activity_focus_pct(a) or 0, a["app_switches_per_h"],
         a["domain_switches_per_h"], a["longest_active_min"], top, r.get("goal"))
 
 
@@ -764,7 +915,7 @@ def stats_report(records, who=None, today=None):
         if (who and r.get("who") != who) or r.get("kind", "deep") != "deep":  # older logs also hold baselines
             continue
         d = dt.datetime.fromisoformat(r["start"]).date()
-        m = float(r.get("minutes") or 0)
+        m = session_minutes(r)
         if d == today:
             day_m += m
         if monday <= d <= today:
@@ -1012,7 +1163,10 @@ def sampler(cfg, rec):
 def watchdog(cfg):
     signal.signal(signal.SIGTERM, lambda *a: os._exit(0))
     print("%s watchdog %d up" % (iso(now()), os.getpid()), flush=True)
-    s0 = read_json(cfg.session) or {}
+    with session_lock(cfg):
+        s0 = read_json(cfg.session) or {}
+    if not s0:
+        return
     rec = Recorder(s0.get("samples_path") or os.path.join(cfg.sessions, "unknown.jsonl"), cfg.tracking)
     serve_state(cfg, rec)
     if cfg.tracking:
@@ -1024,21 +1178,19 @@ def watchdog(cfg):
             print("%s couldn't show the session on deepwork.garden: %s" % (iso(now()), e), flush=True)
     while True:
         s = read_json(cfg.session)
-        if not s:
+        if not s or s.get("start") != s0["start"]:
             return
         if now() >= s["end"]:
-            if claim_and_restore(cfg, "timer"):
-                if s.get("from_web"):
-                    shutdown(cfg, True)
-                    act(cfg, "notify", "Time is up: %s. Rate it on deepwork.garden." % s.get("goal"))
-                elif pid_alive(s.get("fg_pid")):  # the terminal that started it runs the shutdown itself
-                    act(cfg, "notify", "Time is up: %s." % s.get("goal"))
-                else:
-                    act(cfg, "notify", "Time is up: %s. Run deepwork off for the shutdown." % s.get("goal"))
-                    act(cfg, "terminal", shutdown_command(cfg))
+            finish_expired(cfg, s)
             return
         for a in cfg.apps:
-            act(cfg, "quit", a)
+            with session_lock(cfg):
+                current = read_json(cfg.session)
+                if not current or current.get("start") != s0["start"]:
+                    return
+                if now() >= current["end"]:
+                    break
+                act(cfg, "quit", a, deadline=current["end"])
         time.sleep(min(REQUIT_EVERY, max(0.2, s["end"] - now())))
 
 
